@@ -79,6 +79,7 @@ Close Firefox first. This removes the three theme files. Your backups are kept i
 - `user.js` is read on every startup and **overwrites** the preferences it contains. If you change one of those preferences in `about:config`, Firefox will restore it on the next launch.
 - The new tab page uses `#150B11` as its background. Wallpaper tiles from the customize pencil are translated into three embedded FurrOS images behind the wordmark.
 - Uploading your own image does not apply a background: the wordmark stays without any extra background image.
+- On Windows, Firefox keeps `profiles.ini` and `installs.ini` in `%APPDATA%\Mozilla\Firefox\`, one level above the `Profiles` folder. The installer reads both files (also for Microsoft Store installs) so the theme goes into the profile Firefox actually uses.
 - Tested on Firefox 161, Linux/Wayland. Other versions may need small adjustments.
 
 ## Troubleshooting

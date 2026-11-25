@@ -290,43 +290,72 @@ def create_firefox_profile() -> None:
             pass
 
     system = platform.system()
+    installs_ini: Path | None = None
     if system == "Windows":
         appdata = os.environ.get("APPDATA", str(Path.home() / "AppData" / "Roaming"))
-        base = Path(appdata) / "Mozilla" / "Firefox" / "Profiles"
+        firefox_dir = Path(appdata) / "Mozilla" / "Firefox"
+        base = firefox_dir / "Profiles"
+        ini = firefox_dir / "profiles.ini"
+        installs_ini = firefox_dir / "installs.ini"
+        relative = "Profiles/{profile_dir}"
     elif system == "Darwin":
         base = Path.home() / "Library" / "Application Support" / "Firefox" / "Profiles"
+        ini = base / "profiles.ini"
+        relative = "{profile_dir}"
     elif shutil.which("flatpak") and command_works(
         ["flatpak", "run", "org.mozilla.firefox"]
     ):
         base = Path.home() / ".var" / "app" / "org.mozilla.firefox" / ".mozilla" / "firefox"
+        ini = base / "profiles.ini"
+        relative = "{profile_dir}"
     elif shutil.which("snap") and command_works(["snap", "run", "firefox"]):
         base = Path.home() / "snap" / "firefox" / "common" / ".mozilla" / "firefox"
+        ini = base / "profiles.ini"
+        relative = "{profile_dir}"
     else:
         config_home = os.environ.get("XDG_CONFIG_HOME") or str(Path.home() / ".config")
         base = Path(config_home) / "mozilla" / "firefox"
+        ini = base / "profiles.ini"
+        relative = "{profile_dir}"
 
-    ini = base / "profiles.ini"
     base.mkdir(parents=True, exist_ok=True)
     profile_id = secrets.token_hex(4)
     profile_dir = f"{profile_id}.default-release"
     (base / profile_dir).mkdir(parents=True, exist_ok=True)
+    default_path = relative.format(profile_dir=profile_dir)
     ini.write_text(
         "\n".join(
             (
+                "[General]",
+                "StartWithLastProfile=1",
+                "Version=2",
+                "",
                 f"[Install{profile_id}]",
-                f"Default={profile_dir}",
+                f"Default={default_path}",
                 "Locked=1",
                 "",
                 "[Profile0]",
                 "Name=default-release",
                 "IsRelative=1",
-                f"Path={profile_dir}",
+                f"Path={default_path}",
                 "Default=1",
                 "",
             )
         ),
         encoding="utf-8",
     )
+    if installs_ini is not None:
+        installs_ini.write_text(
+            "\n".join(
+                (
+                    f"[Install{profile_id}]",
+                    f"Default={default_path}",
+                    "Locked=1",
+                    "",
+                )
+            ),
+            encoding="utf-8",
+        )
     print(f"Created Firefox profile: {base / profile_dir}")
 
 
@@ -335,13 +364,37 @@ def candidate_ini_files() -> list[Path]:
     raw: list[Path] = []
 
     if platform.system() == "Windows":
+        # Firefox keeps profiles.ini and installs.ini in %APPDATA%\Mozilla\Firefox,
+        # one level above the Profiles folder. installs.ini is what Firefox 62+
+        # uses to remember the default profile.
         for variable in ("APPDATA", "LOCALAPPDATA"):
             value = os.environ.get(variable)
-            if value:
-                raw.append(
-                    Path(value) / "Mozilla" / "Firefox" / "Profiles" / "profiles.ini"
-                )
-        raw.append(home / "Mozilla" / "Firefox" / "Profiles" / "profiles.ini")
+            if not value:
+                continue
+            firefox_dir = Path(value) / "Mozilla" / "Firefox"
+            raw += [
+                firefox_dir / "profiles.ini",
+                firefox_dir / "installs.ini",
+                firefox_dir / "Profiles" / "profiles.ini",
+            ]
+
+        local = os.environ.get("LOCALAPPDATA")
+        if local:
+            packages = Path(local) / "Packages"
+            if packages.is_dir():
+                for app in packages.glob("Mozilla.Firefox*"):
+                    for relative in (
+                        "LocalCache/Roaming/Mozilla/Firefox",
+                        "LocalCache/Local/Mozilla/Firefox",
+                        "LocalState/Mozilla/Firefox",
+                    ):
+                        store_dir = app / relative
+                        raw += [store_dir / "profiles.ini", store_dir / "installs.ini"]
+
+        raw += [
+            home / "Mozilla" / "Firefox" / "profiles.ini",
+            home / "Mozilla" / "Firefox" / "installs.ini",
+        ]
     elif platform.system() == "Darwin":
         raw.append(
             home / "Library" / "Application Support" / "Firefox" / "Profiles" / "profiles.ini"
@@ -357,10 +410,13 @@ def candidate_ini_files() -> list[Path]:
         ]
 
     # Unusual installs may still use the generic Linux/macOS locations.
-    raw += [
-        home / ".mozilla" / "firefox" / "profiles.ini",
-        home / ".config" / "mozilla" / "firefox" / "profiles.ini",
-    ]
+    # Do not add these on Windows: they would mix Linux profiles into the
+    # Windows profile list and could make the installer choose the wrong one.
+    if platform.system() != "Windows":
+        raw += [
+            home / ".mozilla" / "firefox" / "profiles.ini",
+            home / ".config" / "mozilla" / "firefox" / "profiles.ini",
+        ]
 
     seen: set[Path] = set()
     result: list[Path] = []
@@ -404,12 +460,13 @@ def active_profile() -> Path | None:
     return None
 
 
-def read_profiles(ini: Path) -> list[dict[str, object]]:
+def read_install_defaults(ini: Path) -> set[Path]:
+    """Read [Install...] Default entries from profiles.ini or installs.ini."""
     parser = configparser.ConfigParser(strict=False)
     parser.read(ini)
     base = ini.parent
 
-    install_defaults: set[Path] = set()
+    found: set[Path] = set()
     for section in parser.sections():
         if not section.lower().startswith("install"):
             continue
@@ -420,9 +477,16 @@ def read_profiles(ini: Path) -> list[dict[str, object]]:
         if not path.is_absolute():
             path = base / path
         try:
-            install_defaults.add(path.resolve())
+            found.add(path.resolve())
         except OSError:
-            install_defaults.add(path)
+            found.add(path)
+    return found
+
+
+def read_profiles(ini: Path) -> list[dict[str, object]]:
+    parser = configparser.ConfigParser(strict=False)
+    parser.read(ini)
+    base = ini.parent
 
     found: list[dict[str, object]] = []
     for section in parser.sections():
@@ -448,7 +512,7 @@ def read_profiles(ini: Path) -> list[dict[str, object]]:
                     "path": path,
                     "resolved": resolved,
                     "legacy_default": legacy_default,
-                    "install_default": resolved in install_defaults,
+                    "install_default": False,
                 }
             )
 
@@ -462,16 +526,25 @@ def choose_profile(specified: str | None, running: Path | None = None) -> Path:
             raise SystemExit(f"Error: profile directory does not exist: {path}")
         return path
 
+    inis = candidate_ini_files()
+    for ini in inis:
+        print(f"Found profile list: {ini}")
+
+    install_defaults: set[Path] = set()
+    for ini in inis:
+        install_defaults |= read_install_defaults(ini)
+    for default in install_defaults:
+        print(f"Default profile: {default}")
+
     profiles: list[dict[str, object]] = []
     seen: set[Path] = set()
-    for ini in candidate_ini_files():
-        print(f"Found profile list: {ini}")
+    for ini in inis:
         for item in read_profiles(ini):
-            path = Path(item["path"])
             resolved = Path(item["resolved"])
             if resolved in seen:
                 continue
             seen.add(resolved)
+            item["install_default"] = resolved in install_defaults
             profiles.append(item)
 
     if not profiles:

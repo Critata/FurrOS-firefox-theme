@@ -99,5 +99,57 @@ PY
   pass "Python installer agrees with the shell installer"
 fi
 
+grep -Fq "installs.ini" "$ROOT/install.ps1" \
+  || fail "PowerShell installer does not read installs.ini"
+grep -Fq "Join-Path \$firefoxDir 'profiles.ini'" "$ROOT/install.ps1" \
+  || fail "PowerShell installer does not read profiles.ini from %APPDATA%\\Mozilla\\Firefox"
+pass "PowerShell installer uses the real Windows profile locations"
+
+if command -v python3 >/dev/null 2>&1; then
+  mkdir -p "$TMP/winroot"
+  WINROOT="$TMP/winroot" PYTHONPATH="$ROOT" python3 -B - <<'PY' || fail "Windows profile detection failed"
+import os
+from pathlib import Path
+import install
+
+root = Path(os.environ["WINROOT"])
+appdata = root / "AppData" / "Roaming"
+local = root / "AppData" / "Local"
+firefox = appdata / "Mozilla" / "Firefox"
+profiles = firefox / "Profiles"
+default = profiles / "abcd.default-release"
+other = profiles / "efgh.default"
+default.mkdir(parents=True, exist_ok=True)
+other.mkdir(parents=True, exist_ok=True)
+
+(firefox / "profiles.ini").write_text(
+    "[General]\nStartWithLastProfile=1\nVersion=2\n\n"
+    "[Profile0]\nName=default-release\nIsRelative=1\nPath=Profiles/abcd.default-release\n\n"
+    "[Profile1]\nName=default\nIsRelative=1\nPath=Profiles/efgh.default\nDefault=1\n",
+    encoding="utf-8",
+)
+(firefox / "installs.ini").write_text(
+    "[Install12345678]\nDefault=Profiles/abcd.default-release\nLocked=1\n",
+    encoding="utf-8",
+)
+
+os.environ["APPDATA"] = str(appdata)
+os.environ["LOCALAPPDATA"] = str(local)
+original_system = install.platform.system
+install.platform.system = lambda: "Windows"
+try:
+    inis = install.candidate_ini_files()
+    assert firefox / "profiles.ini" in inis, inis
+    assert firefox / "installs.ini" in inis, inis
+    chosen = install.choose_profile(None)
+    assert chosen == default, (chosen, default)
+    install.create_firefox_profile()
+    assert len(list(profiles.iterdir())) == 2, "create_firefox_profile created a duplicate profile"
+finally:
+    install.platform.system = original_system
+PY
+  pass "Windows profiles.ini + installs.ini point to the real default profile"
+fi
+
 echo
 echo "All tests passed."

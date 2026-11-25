@@ -108,31 +108,42 @@ function Initialize-FirefoxProfile {
 
   $appData = $env:APPDATA
   if (-not $appData) { $appData = Join-Path $env:USERPROFILE 'AppData\Roaming' }
-  $profilesIni = Join-Path $appData 'Mozilla\Firefox\Profiles\profiles.ini'
-  $base = Split-Path -Parent $profilesIni
+  $firefoxDir = Join-Path $appData 'Mozilla\Firefox'
+  $profilesDir = Join-Path $firefoxDir 'Profiles'
+  $profilesIni = Join-Path $firefoxDir 'profiles.ini'
+  $installsIni = Join-Path $firefoxDir 'installs.ini'
 
-  New-Item -ItemType Directory -Path $base -Force | Out-Null
+  New-Item -ItemType Directory -Path $profilesDir -Force | Out-Null
   $id = -join (1..8 | ForEach-Object {
     $index = Get-Random -Minimum 0 -Maximum 36
     '0123456789abcdefghijklmnopqrstuvwxyz'[$index]
   })
   $dir = "$id.default-release"
-  New-Item -ItemType Directory -Path (Join-Path $base $dir) -Force | Out-Null
+  $relative = "Profiles/$dir"
+  New-Item -ItemType Directory -Path (Join-Path $profilesDir $dir) -Force | Out-Null
 
-  $lines = @(
-    "[Install$id]",
-    "Default=$dir",
-    'Locked=1',
+  $profileLines = @(
+    '[General]',
+    'StartWithLastProfile=1',
+    'Version=2',
     '',
     '[Profile0]',
     'Name=default-release',
     'IsRelative=1',
-    "Path=$dir",
+    "Path=$relative",
     'Default=1',
     ''
   )
-  Set-Content -LiteralPath $profilesIni -Value $lines -Encoding ASCII
-  Write-Host "Created Firefox profile: $(Join-Path $base $dir)"
+  Set-Content -LiteralPath $profilesIni -Value $profileLines -Encoding ASCII
+
+  $installLines = @(
+    "[Install$id]",
+    "Default=$relative",
+    'Locked=1',
+    ''
+  )
+  Set-Content -LiteralPath $installsIni -Value $installLines -Encoding ASCII
+  Write-Host "Created Firefox profile: $(Join-Path $profilesDir $dir)"
 }
 
 function Test-FirefoxRunning {
@@ -143,20 +154,45 @@ function Test-FirefoxRunning {
 }
 
 function Get-IniCandidates {
+  # Firefox keeps profiles.ini and installs.ini in %APPDATA%\Mozilla\Firefox,
+  # one level above the Profiles folder. Both files are needed: installs.ini
+  # is what Firefox 62+ uses to remember the default profile.
   $raw = @()
-  if ($env:APPDATA) {
-    $raw += (Join-Path $env:APPDATA 'Mozilla\Firefox\Profiles\profiles.ini')
-  }
-  if ($env:LOCALAPPDATA) {
-    $raw += (Join-Path $env:LOCALAPPDATA 'Mozilla\Firefox\Profiles\profiles.ini')
-  }
-  if ($env:USERPROFILE) {
-    $raw += (Join-Path $env:USERPROFILE 'Mozilla\Firefox\Profiles\profiles.ini')
-    $raw += (Join-Path $env:USERPROFILE '.mozilla\firefox\profiles.ini')
-    $raw += (Join-Path $env:USERPROFILE '.config\mozilla\firefox\profiles.ini')
+  foreach ($variable in @('APPDATA', 'LOCALAPPDATA')) {
+    $value = [Environment]::GetEnvironmentVariable($variable)
+    if (-not $value) { continue }
+    $firefoxDir = Join-Path $value 'Mozilla\Firefox'
+    $raw += (Join-Path $firefoxDir 'profiles.ini')
+    $raw += (Join-Path $firefoxDir 'installs.ini')
+    $raw += (Join-Path $firefoxDir 'Profiles\profiles.ini')
   }
 
-  $seen = @{}
+  # Microsoft Store / MSIX Firefox stores its profile under Packages.
+  $local = [Environment]::GetEnvironmentVariable('LOCALAPPDATA')
+  if ($local) {
+    $packages = Join-Path $local 'Packages'
+    if (Test-Path -LiteralPath $packages -PathType Container) {
+      $storeApps = Get-ChildItem -LiteralPath $packages -Directory -Filter 'Mozilla.Firefox*' -ErrorAction SilentlyContinue
+      foreach ($app in $storeApps) {
+        foreach ($relative in @(
+          'LocalCache\Roaming\Mozilla\Firefox',
+          'LocalCache\Local\Mozilla\Firefox',
+          'LocalState\Mozilla\Firefox'
+        )) {
+          $storeDir = Join-Path $app.FullName $relative
+          $raw += (Join-Path $storeDir 'profiles.ini')
+          $raw += (Join-Path $storeDir 'installs.ini')
+        }
+      }
+    }
+  }
+
+  if ($env:USERPROFILE) {
+    $raw += (Join-Path $env:USERPROFILE 'Mozilla\Firefox\profiles.ini')
+    $raw += (Join-Path $env:USERPROFILE 'Mozilla\Firefox\installs.ini')
+  }
+
+  $seen = [System.Collections.Generic.Dictionary[string, bool]]::new([StringComparer]::OrdinalIgnoreCase)
   $result = @()
   foreach ($item in $raw) {
     if (-not $item) { continue }
@@ -170,8 +206,58 @@ function Get-IniCandidates {
   return $result
 }
 
+function Read-IniSections {
+  param([string]$Ini)
+
+  $sections = @()
+  $section = ''
+  $data = @{}
+
+  foreach ($line in (Get-Content -LiteralPath $Ini)) {
+    $trimmed = $line.Trim()
+    if ($trimmed -match '^\[(.+)\]$') {
+      if ($section) {
+        $sections += [pscustomobject]@{ Name = $section; Data = $data }
+      }
+      $section = $matches[1]
+      $data = @{}
+      continue
+    }
+    if ($section -and $trimmed -match '^([^=]+)=(.*)$') {
+      $data[$matches[1].Trim()] = $matches[2].Trim()
+    }
+  }
+  if ($section) {
+    $sections += [pscustomobject]@{ Name = $section; Data = $data }
+  }
+  return $sections
+}
+
+function Get-InstallDefaults {
+  param([string[]]$IniFiles = @())
+
+  $defaults = @()
+  foreach ($ini in $IniFiles) {
+    $base = Split-Path -Parent $ini
+    foreach ($section in @(Read-IniSections -Ini $ini)) {
+      if ($section.Name -notlike 'Install*') { continue }
+      if (-not $section.Data.ContainsKey('Default')) { continue }
+
+      $value = [Environment]::ExpandEnvironmentVariables($section.Data['Default'])
+      if ([IO.Path]::IsPathRooted($value)) {
+        $path = [IO.Path]::GetFullPath($value)
+      } else {
+        $path = [IO.Path]::GetFullPath((Join-Path $base $value))
+      }
+      $path = $path.TrimEnd([char]'\')
+      if ($defaults -notcontains $path) { $defaults += $path }
+    }
+  }
+  return $defaults
+}
+
 function ConvertTo-ProfileObject {
-  param([string]$Base, [hashtable]$Data, [string[]]$InstallDefaults = @())
+  param([string]$Base, [hashtable]$Data)
   if (-not $Data.ContainsKey('Path')) { return $null }
 
   $expanded = [Environment]::ExpandEnvironmentVariables($Data['Path'])
@@ -186,60 +272,46 @@ function ConvertTo-ProfileObject {
   $name = Split-Path -Leaf $path
   if ($Data.ContainsKey('Name') -and $Data['Name']) { $name = $Data['Name'] }
 
-  $isDefault = $false
-  if ($Data.ContainsKey('Default') -and $Data['Default'] -eq '1') { $isDefault = $true }
+  $legacyDefault = $false
+  if ($Data.ContainsKey('Default') -and $Data['Default'] -eq '1') { $legacyDefault = $true }
 
-  # Firefox's real default is declared in [Install...], not in the legacy
-  # [Profile...] Default=1 flag.
-  $score = 1
-  if ($isDefault) { $score = 2 }
-  foreach ($defaultPath in $InstallDefaults) {
-    if ($defaultPath -eq $path) { $score = 3 }
-  }
-
-  return [pscustomobject]@{ Name = $name; Path = $path; Default = $isDefault; Score = $score }
+  return [pscustomobject]@{ Name = $name; Path = $path; LegacyDefault = $legacyDefault }
 }
 
 function Read-Profiles {
-  param([string]$Ini)
-  $base = Split-Path -Parent $Ini
+  param([string[]]$IniFiles = @(), [string[]]$InstallDefaults = @())
+
   $profiles = @()
-  $section = ''
-  $data = @{}
-  $installDefaults = @()
+  foreach ($ini in $IniFiles) {
+    $base = Split-Path -Parent $ini
+    foreach ($section in @(Read-IniSections -Ini $ini)) {
+      if ($section.Name -notlike 'Profile*') { continue }
 
-  foreach ($line in (Get-Content -LiteralPath $Ini)) {
-    $trimmed = $line.Trim()
-    if ($trimmed -match '^\[(.+)\]$') {
-      if ($section -like 'Profile*') {
-        $item = ConvertTo-ProfileObject -Base $base -Data $data -InstallDefaults $installDefaults
-        if ($item) { $profiles += $item }
+      $item = ConvertTo-ProfileObject -Base $base -Data $section.Data
+      if (-not $item) { continue }
+
+      # Firefox's real default comes from [Install...] in profiles.ini or
+      # installs.ini, not from the legacy [Profile...] Default=1 flag.
+      $score = 1
+      if ($item.LegacyDefault) { $score = 2 }
+      foreach ($defaultPath in $InstallDefaults) {
+        if ([string]::Equals(
+          $defaultPath.TrimEnd([char]'\'), $item.Path.TrimEnd([char]'\'),
+          [StringComparison]::OrdinalIgnoreCase
+        )) { $score = 3; break }
       }
-      $section = $matches[1]
-      $data = @{}
-      continue
-    }
-    if ($trimmed -match '^([^=]+)=(.*)$') {
-      $key = $matches[1].Trim()
-      $value = $matches[2].Trim()
-      if ($section -like 'Install*' -and $key -eq 'Default') {
-        if ([IO.Path]::IsPathRooted($value)) {
-          $installDefaults += [IO.Path]::GetFullPath($value)
-        } else {
-          $installDefaults += [IO.Path]::GetFullPath((Join-Path $base $value))
+      $item | Add-Member -NotePropertyName Score -NotePropertyValue $score -Force
+
+      $duplicate = $false
+      foreach ($known in $profiles) {
+        if ([string]::Equals($known.Path, $item.Path, [StringComparison]::OrdinalIgnoreCase)) {
+          $duplicate = $true
+          break
         }
-        continue
       }
-      if ($section -like 'Profile*') {
-        $data[$key] = $value
-      }
+      if (-not $duplicate) { $profiles += $item }
     }
   }
-  if ($section -like 'Profile*') {
-    $item = ConvertTo-ProfileObject -Base $base -Data $data -InstallDefaults $installDefaults
-    if ($item) { $profiles += $item }
-  }
-
   return $profiles
 }
 
@@ -255,17 +327,17 @@ function Choose-Profile {
     return $path
   }
 
-  $all = @()
-  foreach ($ini in (Get-IniCandidates)) {
+  $iniFiles = @(Get-IniCandidates)
+  foreach ($ini in $iniFiles) {
     Write-Host "Found profile list: $ini"
-    foreach ($item in (Read-Profiles -Ini $ini)) {
-      $duplicate = $false
-      foreach ($known in $all) {
-        if ($known.Path -eq $item.Path) { $duplicate = $true; break }
-      }
-      if (-not $duplicate) { $all += $item }
-    }
   }
+
+  $installDefaults = @(Get-InstallDefaults -IniFiles $iniFiles)
+  foreach ($defaultPath in $installDefaults) {
+    Write-Host "Default profile: $defaultPath"
+  }
+
+  $all = @(Read-Profiles -IniFiles $iniFiles -InstallDefaults $installDefaults)
 
   if ($all.Count -eq 0) {
     throw "Error: Firefox profile not found.`nSpecify it with: powershell -File install.ps1 -Profile 'C:\path\to\profile'"
