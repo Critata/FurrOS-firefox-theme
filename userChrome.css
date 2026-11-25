@@ -1,13 +1,13 @@
 /* ==========================================================================
    FurrOS theme for Firefox  ·  https://furros.xyz/
-   Palette, bordi e ombre "sticker" presi dal design system del sito.
-   Disattivabile mettendo a false:
+   Palette, borders and "sticker" shadows taken from the site design system.
+   Disable it by setting to false:
    toolkit.legacyUserProfileCustomizations.stylesheets
    ========================================================================== */
 
 :root {
-  /* Firefox 161 usa i token light-dark(): senza questo i pannelli restano
-     chiari (testo scuro su sfondo chiaro) anche con il tema FurrOS. */
+  /* Firefox 161 uses light-dark() tokens: without this, panels stay
+     light (dark text on a light background) even with the FurrOS theme. */
   color-scheme: dark !important;
 
   --furr-night: #150b11;
@@ -31,7 +31,7 @@
   --furr-font: "Nunito", "Segoe UI", system-ui, sans-serif;
   --furr-mono: "JetBrains Mono", ui-monospace, "Cascadia Mono", monospace;
 
-  /* Variabili native di Firefox: fanno gran parte del lavoro */
+  /* Firefox native variables: they do most of the work */
   --lwt-accent-color: var(--furr-night) !important;
   --lwt-text-color: var(--furr-text) !important;
   --toolbar-bgcolor: var(--furr-plum) !important;
@@ -84,7 +84,7 @@
 }
 
 /* --------------------------------------------------------------------------
-   Finestra, barre e font
+   Window, toolbars and fonts
    -------------------------------------------------------------------------- */
 #main-window,
 #browser,
@@ -121,7 +121,7 @@ toolbarbutton {
 }
 
 /* --------------------------------------------------------------------------
-   Schede: chip con bordo ink e ombra sticker
+   Tabs: chips with ink border and sticker shadow
    -------------------------------------------------------------------------- */
 #tabbrowser-tabs {
   --tab-min-height: 38px !important;
@@ -191,7 +191,7 @@ toolbarbutton {
   color: var(--furr-paper) !important;
 }
 
-/* Nuova scheda + pulsanti della striscia */
+/* New tab + toolbar strip buttons */
 #tabs-newtab-button,
 #new-tab-button,
 #alltabs-button,
@@ -209,7 +209,7 @@ toolbarbutton {
 }
 
 /* --------------------------------------------------------------------------
-   Barra degli indirizzi
+   Address bar
    -------------------------------------------------------------------------- */
 #nav-bar {
   background: var(--furr-plum) !important;
@@ -222,11 +222,11 @@ toolbarbutton {
   padding-inline: 6px !important;
 }
 
-/* Firefox 161+: la barra indirizzi è un custom element con shadow DOM.
-   Si personalizza tramite le sue variabili CSS. */
+/* Firefox 161+: the address bar is a custom element with a shadow DOM.
+   Customize it through its CSS variables. */
 #urlbar {
-  /* Il bordo esterno resta, ma niente outline interno sull'input:
-     altrimenti compaiono due linee verticali ciano quando si clicca. */
+  /* The outer border stays, but no inner outline on the input:
+     otherwise two cyan vertical lines appear when you click. */
   --urlbar-input-container-outline-open: none !important;
   --urlbar-input-container-outline-open-focused: none !important;
   --urlbar-background-outline-focused: none !important;
@@ -238,8 +238,8 @@ toolbarbutton {
   --urlbar-background-border-radius: calc(var(--urlbar-height) / 2) !important;
   --urlbarview-border-radius: calc(var(--urlbar-height) / 2) !important;
   --urlbar-border-radius: calc(var(--urlbar-height) / 2) !important;
-  /* Niente sfondo "allargato": la barra resta il piccolo ovale e la tendina
-     è allineata alla stessa larghezza, con un piccolo spazio per l'ombra. */
+  /* No "expanded" background: the bar stays the small oval and the dropdown
+     is aligned to the same width, with a small gap for the shadow. */
   --urlbar-background-overhang-open: 0px !important;
   --urlbar-joint-background-overlap: 0px !important;
   --urlbarview-joint-background-outset-inline: 0px !important;
@@ -281,8 +281,8 @@ toolbarbutton {
   box-shadow: none !important;
 }
 
-/* Unione continua: la tendina si attacca al piccolo ovale con un solo
-   contorno, disegnato come un'unica pill barra + risultati. */
+/* Seamless union: the dropdown attaches to the small oval with a single
+   outline, drawn as one pill for bar + results. */
 #urlbar[focused] .urlbar-background {
   border-radius: calc(var(--urlbar-height) / 2) !important;
 }
@@ -309,7 +309,7 @@ toolbarbutton {
   box-shadow: none !important;
 }
 
-/* Nessun rettangolo interno: il focus è solo il bordo ovale della barra. */
+/* No inner rectangle: focus is only the oval bar border. */
 #urlbar-input,
 #urlbar-input:focus,
 #urlbar-input:-moz-focusring {
@@ -352,7 +352,7 @@ toolbarbutton {
   font-weight: 900 !important;
 }
 
-/* Risultati del megabar */
+/* Megabar results */
 #urlbar-results {
   background: var(--furr-surface) !important;
   border-radius: var(--furr-radius) !important;
@@ -404,7 +404,7 @@ toolbarbutton {
 }
 
 /* --------------------------------------------------------------------------
-   Pulsanti delle barre
+   Toolbar buttons
    -------------------------------------------------------------------------- */
 #nav-bar toolbarbutton,
 #PersonalToolbar toolbarbutton,
@@ -432,7 +432,7 @@ toolbarbutton {
 }
 
 /* --------------------------------------------------------------------------
-   Barra dei segnalibri
+   Bookmarks toolbar
    -------------------------------------------------------------------------- */
 #PersonalToolbar {
   background: var(--furr-plum) !important;
@@ -456,10 +456,10 @@ toolbarbutton {
 }
 
 /* --------------------------------------------------------------------------
-   Menu contestuali e pannelli
+   Context menus and panels
    -------------------------------------------------------------------------- */
-/* Firefox 161 mette `color-scheme: light dark` direttamente sul popup:
-   i token light-dark() resterebbero chiari anche con :root scuro. */
+/* Firefox 161 sets `color-scheme: light dark` directly on the popup:
+   light-dark() tokens would stay light even with a dark :root. */
 menupopup,
 panel,
 #contentAreaContextMenu,
@@ -580,7 +580,7 @@ panel::part(content),
   border-bottom: 2px solid var(--furr-ink) !important;
 }
 
-/* Campi e liste dentro i pannelli: niente più bianco */
+/* Fields and lists inside panels: no more white */
 panel input,
 panel textarea,
 panel-list,
@@ -600,12 +600,12 @@ panel textarea::placeholder {
   color: var(--furr-dim) !important;
 }
 
-/* Menu hamburger (appMenu-popup in Firefox 161) */
+/* Hamburger menu (appMenu-popup in Firefox 161) */
 #appMenu-popup {
   color: var(--furr-text) !important;
 
-  /* I token qui sotto vengono impostati di nuovo da Firefox con !important
-     solo se Nova è attivo: li riscriviamo sul pannello stesso. */
+  /* The tokens below are reset by Firefox with !important
+     only when Nova is active: we rewrite them on the panel itself. */
   --panel-banner-item-color: var(--furr-text) !important;
   --panel-banner-item-background-color: var(--furr-surface-2) !important;
   --panel-banner-item-hover-bgcolor: var(--furr-maroon) !important;
@@ -631,7 +631,7 @@ panel textarea::placeholder {
   min-height: 34px !important;
 }
 
-/* Notifiche / popup download */
+/* Notifications / download popups */
 #downloadsPanel-multiView,
 #downloadsListBox {
   background: var(--furr-surface) !important;
@@ -647,7 +647,7 @@ panel textarea::placeholder {
 }
 
 /* --------------------------------------------------------------------------
-   Barra di stato, trova, sidebar
+   Status bar, find bar, sidebar
    -------------------------------------------------------------------------- */
 #statuspanel-label {
   background: var(--furr-ink) !important;
@@ -705,7 +705,7 @@ findbar {
   background: var(--furr-surface-2) !important;
 }
 
-/* Pulsanti di controllo finestra (se disegnati da Firefox) */
+/* Window control buttons (when drawn by Firefox) */
 .titlebar-button {
   border-radius: 8px !important;
   color: var(--furr-text) !important;
@@ -726,7 +726,7 @@ findbar {
   color: var(--furr-paper) !important;
 }
 
-/* Selezione e focus */
+/* Selection and focus */
 ::selection {
   background: var(--furr-pink) !important;
   color: var(--furr-ink) !important;
@@ -738,10 +738,10 @@ findbar {
 }
 
 /* --------------------------------------------------------------------------
-   Unione liscia barra URL / tendina: un solo bordo ciano e una sola ombra,
-   dalla cima dell'ovale fino in fondo ai risultati. L'ovale non cambia:
-   quando la tendina è aperta il suo bordo viene solo nascosto e viene
-   disegnato il contorno continuo dalla tendina stessa.
+   Smooth URL bar / dropdown union: one cyan border and one shadow,
+   from the top of the oval down to the bottom of the results. The oval
+   does not change: when the dropdown opens its border is only hidden and
+   the continuous outline is drawn by the dropdown itself.
    -------------------------------------------------------------------------- */
 #urlbar[open] > .urlbar-background {
   border-color: transparent !important;
@@ -785,7 +785,7 @@ findbar {
   z-index: 1 !important;
 }
 
-/* Divisoria a forma di piccola ovale tra ciò che scrivi e i risultati. */
+/* Small oval-shaped divider between what you type and the results. */
 #urlbar[open] .urlbarView::after {
   content: "" !important;
   position: absolute !important;

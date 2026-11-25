@@ -1,24 +1,24 @@
 /* ==========================================================================
-   FurrOS theme for Firefox  ·  pagine interne (nuova scheda, about:config)
+   FurrOS theme for Firefox  ·  internal pages (new tab, about:config)
    ========================================================================== */
 
 /* --------------------------------------------------------------------------
-   Nuova scheda / about:home
+   New tab / about:home
 
-   SFONDO SOTTO "FurrOS": di default nessuno.
-   Scegli una delle opzioni qui sotto cambiando --furr-wordmark-bg-image:
+   BACKGROUND BEHIND "FurrOS": none by default.
+   Choose one of the options below by changing --furr-wordmark-bg-image:
 
-     var(--furr-bg-wp-static)     sfondo FurrOS statico (immagine del sito)
-     var(--furr-bg-wp-kde)        sfondo KDE animato (immagine del sito)
-     var(--furr-bg-hyprland)      sfondo Hyprland (immagine del sito)
+     var(--furr-bg-wp-static)     static FurrOS background (site image)
+     var(--furr-bg-wp-kde)        animated KDE background (site image)
+     var(--furr-bg-hyprland)      Hyprland background (site image)
 
-   Immagine locale: Firefox blocca file:// su about:newtab, quindi convertila
-   in base64 e incollala qui:
-     python3 -c "import base64;print(base64.b64encode(open('mia.webp','rb').read()).decode())"
-     --furr-wordmark-bg-image: url("data:image/webp;base64,INCOLLA_QUI");
+   Local image: Firefox blocks file:// on about:newtab, so convert it to
+   base64 and paste it here:
+     python3 -c "import base64;print(base64.b64encode(open('my.webp','rb').read()).decode())"
+     --furr-wordmark-bg-image: url("data:image/webp;base64,PASTE_HERE");
 
-   Per il solo pannello piatto: --furr-wordmark-background: #2a1a22;
-   (oppure furr.newtab.wordmark.background = true in user.js).
+   For a flat panel only: --furr-wordmark-background: #2a1a22;
+   (or furr.newtab.wordmark.background = true in user.js).
    -------------------------------------------------------------------------- */
 @-moz-document url("about:newtab"), url("about:home") {
   :root {
@@ -54,13 +54,13 @@
     font-family: "Nunito", system-ui, sans-serif !important;
   }
 
-  /* Via il logo Firefox, al suo posto il wordmark FurrOS */
+  /* Remove the Firefox logo and replace it with the FurrOS wordmark */
   .search-wrapper .logo-and-wordmark-wrapper,
   .logo-and-wordmark-wrapper {
     display: none !important;
   }
 
-  /* Wordmark originale del sito: img/lockup.webp (zampa + FurrOS) */
+  /* Original site wordmark: img/lockup.webp (paw + FurrOS) */
   .search-wrapper::before {
     content: "" !important;
     display: block !important;
@@ -79,8 +79,8 @@
     filter: drop-shadow(4px 4px 0 #0e080b) !important;
   }
 
-  /* Sfondo opzionale dietro il wordmark.
-     Si attiva/disattiva con furr.newtab.wordmark.background in user.js. */
+  /* Optional background behind the wordmark.
+     Toggle it with furr.newtab.wordmark.background in user.js. */
   @media -moz-pref("furr.newtab.wordmark.background") {
     .search-wrapper::before {
       background-color: #2a1a22 !important;
@@ -90,8 +90,8 @@
     }
   }
 
-  /* La matita "Personalizza" -> Sfondi sceglie lo sfondo dietro il wordmark.
-     Ogni tile di Firefox è mappata su una delle tre immagini FurrOS. */
+  /* The "Customize" pencil -> Wallpapers picks the background behind the wordmark.
+     Every Firefox tile maps to one of the three FurrOS images. */
   @media -moz-pref("browser.newtabpage.activity-stream.newtabWallpapers.wallpaper", "firefox-g-dark"),
     -moz-pref("browser.newtabpage.activity-stream.newtabWallpapers.wallpaper", "firefox-c-dark"),
     -moz-pref("browser.newtabpage.activity-stream.newtabWallpapers.wallpaper", "firefox-d-dark"),
@@ -167,7 +167,7 @@
     :root { --furr-wordmark-bg-image: var(--furr-bg-hyprland) !important; }
   }
 
-  /* Pannello della matita in stile FurrOS */
+  /* FurrOS-styled pencil panel */
   .personalize-button,
   .open-customization-button {
     background: #1e1218 !important;
@@ -214,7 +214,7 @@
     display: none !important;
   }
 
-  /* Barra di ricerca come il pulsante del sito */
+  /* Search bar like the site button */
   .search-wrapper .search-handoff-button,
   .search-wrapper input,
   .search-wrapper .search-inner-wrapper {
@@ -252,7 +252,7 @@
     border-radius: 8px !important;
   }
 
-  /* Via le scorciatoie, i widget e le sezioni: restano solo wordmark e ricerca */
+  /* Remove shortcuts, widgets and sections: only wordmark and search remain */
   .top-sites-section,
   .top-sites,
   .top-site-outer,
@@ -279,7 +279,7 @@
     display: none !important;
   }
 
-  /* Menu contestuale della nuova scheda */
+  /* New tab context menu */
   .context-menu {
     background: #2a1a22 !important;
     border: 2.5px solid #ffecec !important;
@@ -308,7 +308,7 @@
 }
 
 /* --------------------------------------------------------------------------
-   about:blank e pagine vuote
+   about:blank and empty pages
    -------------------------------------------------------------------------- */
 @-moz-document url("about:blank"), url("about:empty") {
   html,
@@ -381,9 +381,9 @@
 }
 
 /* --------------------------------------------------------------------------
-   Sidebar del chatbot AI / AI Window: sono documenti di contenuto, quindi
-   userChrome.css non li raggiunge. Il <meta color-scheme> di Firefox è
-   "light dark": qui forziamo il tema FurrOS anche ai menu e ai selettori.
+   AI chatbot sidebar / AI Window: these are content documents, so
+   userChrome.css does not reach them. Firefox's <meta color-scheme> is
+   "light dark": here we force the FurrOS theme on menus and selects too.
    -------------------------------------------------------------------------- */
 @-moz-document url("chrome://browser/content/genai/chat.html"),
                url-prefix("chrome://browser/content/aiwindow/") {

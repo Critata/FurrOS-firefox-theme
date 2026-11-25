@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Installa il tema FurrOS nel profilo Firefox attivo.
-# Uso: ./install.sh [--profile /path/to/profile] [--uninstall]
+# Installs the FurrOS theme into the active Firefox profile.
+# Usage: ./install.sh [--profile /path/to/profile] [--uninstall]
 
 set -euo pipefail
 
@@ -10,19 +10,19 @@ UNINSTALL=0
 
 usage() {
   cat <<'EOF'
-Uso: ./install.sh [opzioni]
+Usage: ./install.sh [options]
 
-Opzioni:
-  --profile PATH   Usa questo profilo Firefox invece di rilevarlo
-  --uninstall      Rimuove i file del tema (backup inclusi)
-  -h, --help       Mostra questo messaggio
+Options:
+  --profile PATH   Use this Firefox profile instead of detecting it
+  --uninstall      Remove the theme files (backups are kept)
+  -h, --help       Show this message
 EOF
 }
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --profile)
-      [[ $# -ge 2 ]] || { echo "Errore: --profile richiede un percorso." >&2; exit 1; }
+      [[ $# -ge 2 ]] || { echo "Error: --profile requires a path." >&2; exit 1; }
       PROFILE="$2"
       shift 2
       ;;
@@ -35,7 +35,7 @@ while [[ $# -gt 0 ]]; do
       exit 0
       ;;
     *)
-      echo "Opzione sconosciuta: $1" >&2
+      echo "Unknown option: $1" >&2
       usage >&2
       exit 1
       ;;
@@ -71,8 +71,8 @@ PY
 fi
 
 if [[ -z "$PROFILE" || ! -d "$PROFILE" ]]; then
-  echo "Errore: profilo Firefox non trovato." >&2
-  echo "Indicalo con: ./install.sh --profile /percorso/del/profilo" >&2
+  echo "Error: Firefox profile not found." >&2
+  echo "Specify it with: ./install.sh --profile /path/to/profile" >&2
   exit 1
 fi
 
@@ -81,8 +81,8 @@ mkdir -p "$CHROME"
 
 if [[ "$UNINSTALL" -eq 1 ]]; then
   rm -f "$CHROME/userChrome.css" "$CHROME/userContent.css" "$PROFILE/user.js"
-  echo "Tema FurrOS rimosso da: $PROFILE"
-  echo "Riavvia Firefox per applicare la modifica."
+  echo "FurrOS theme removed from: $PROFILE"
+  echo "Restart Firefox to apply the change."
   exit 0
 fi
 
@@ -100,6 +100,6 @@ cp "$SRC/userChrome.css" "$CHROME/userChrome.css"
 cp "$SRC/userContent.css" "$CHROME/userContent.css"
 cp "$SRC/user.js" "$PROFILE/user.js"
 
-echo "Tema FurrOS installato in: $PROFILE"
-echo "Backup dei vecchi file salvati con suffisso .bak-$TS"
-echo "Riavvia Firefox per vedere il tema."
+echo "FurrOS theme installed in: $PROFILE"
+echo "Previous files backed up with suffix .bak-$TS"
+echo "Restart Firefox to see the theme."

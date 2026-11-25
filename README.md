@@ -1,52 +1,52 @@
 # FurrOS Firefox Theme
 
-Tema Firefox ispirato a [FurrOS](https://furros.xyz/): chrome scuro, chips con bordo ink, ombre sticker, wordmark zampa + FurrOS nella nuova scheda.
+A Firefox theme inspired by [FurrOS](https://furros.xyz/): dark chrome, chips with ink borders, sticker shadows, and a paw + FurrOS wordmark on the new tab page.
 
-## Contenuto
+## Contents
 
-- `userChrome.css` — interfaccia Firefox: barra URL ovale, tendina unita, menu e pannelli.
-- `userContent.css` — nuova scheda: wordmark, sfondi FurrOS incorporati, stili del chatbot AI.
-- `user.js` — preferenze necessarie (`toolkit.legacyUserProfileCustomizations.stylesheets`, tema scuro, sfondi, disattivazione shortcut/storie/widget).
-- `install.sh` — installer automatico con backup dei file esistenti.
+- `userChrome.css` — Firefox UI: oval address bar, attached dropdown, menus and panels.
+- `userContent.css` — internal pages: wordmark, embedded FurrOS wallpapers, AI chatbot styles.
+- `user.js` — required preferences (`toolkit.legacyUserProfileCustomizations.stylesheets`, dark theme, wallpapers, disabled shortcuts/stories/widgets).
+- `install.sh` — installer that backs up your existing files.
 
-## Installazione
+## Installation
 
 ```bash
-git clone https://github.com/TUO-USERNAME/FurrOS-firefox-theme.git
+git clone https://github.com/Critata/FurrOS-firefox-theme.git
 cd FurrOS-firefox-theme
 chmod +x install.sh
 ./install.sh
 ```
 
-Se hai più profili o vuoi scegliere manualmente:
+If you have multiple profiles or want to choose one manually:
 
 ```bash
-./install.sh --profile /home/tuonome/.config/mozilla/firefox/xxxx.default-release
+./install.sh --profile /home/username/.config/mozilla/firefox/xxxx.default-release
 ```
 
-L'installer:
+The installer:
 
-1. rileva il profilo Firefox predefinito;
-2. crea la cartella `chrome` se manca;
-3. salva i vecchi `userChrome.css`, `userContent.css` e `user.js` con suffisso `.bak-DATA-ORA`;
-4. copia i file del tema;
-5. chiede di riavviare Firefox.
+1. detects the default Firefox profile;
+2. creates the `chrome` folder if needed;
+3. backs up the existing `userChrome.css`, `userContent.css` and `user.js` with a `.bak-DATE-TIME` suffix;
+4. copies the theme files;
+5. asks you to restart Firefox.
 
-## Disinstallazione
+## Uninstall
 
 ```bash
 ./install.sh --uninstall
 ```
 
-Rimuove i tre file del tema. I backup restano nel profilo.
+This removes the three theme files. Your backups are kept in the profile.
 
-## Note importanti
+## Important notes
 
-- Il file `user.js` viene riletto a ogni avvio e **sovrascrive** le preferenze in esso contenute. Se modifichi una di quelle preferenze da `about:config`, Firefox la ripristinerà al prossimo avvio.
-- La nuova scheda usa come sfondo `#150B11`. Le immagini dei tile della matita vengono tradotte in tre sfondi FurrOS incorporati dietro il wordmark.
-- Il caricamento di immagini personali non viene applicato: il wordmark resta senza sfondo aggiuntivo.
-- Testato su Firefox 161, Linux/Wayland. Per altre versioni potrebbero servire piccoli adattamenti.
+- `user.js` is read on every startup and **overwrites** the preferences it contains. If you change one of those preferences in `about:config`, Firefox will restore it on the next launch.
+- The new tab page uses `#150B11` as its background. Wallpaper tiles from the customize pencil are translated into three embedded FurrOS images behind the wordmark.
+- Uploading your own image does not apply a background: the wordmark stays without any extra background image.
+- Tested on Firefox 161, Linux/Wayland. Other versions may need small adjustments.
 
 ## Release
 
-La release `v1.0.0` contiene il sorgente del tema pronto da scaricare e installare.
+Release `v1.0.0` contains the theme source, ready to download and install.

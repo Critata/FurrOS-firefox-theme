@@ -1,9 +1,9 @@
-// Tema FurrOS per Firefox — preferenze necessarie al caricamento di userChrome.css
-// e per evitare lampi bianchi / wallpaper che coprano la nuova scheda.
+// FurrOS theme for Firefox — preferences needed to load userChrome.css
+// and to avoid white flashes / wallpapers covering the new tab page.
 
 user_pref("toolkit.legacyUserProfileCustomizations.stylesheets", true);
 
-// Tema scuro coerente con il sito
+// Dark theme consistent with the site
 user_pref("browser.theme.content-theme", 0);
 user_pref("browser.theme.toolbar-theme", 0);
 user_pref("layout.css.prefers-color-scheme.content-override", 0);
@@ -12,13 +12,13 @@ user_pref("browser.display.background_color", "#150B11");
 user_pref("browser.display.background_color.dark", "#150B11");
 user_pref("browser.startup.blankWindow", false);
 
-// La matita "Personalizza" della nuova scheda mostra gli sfondi.
-// Il wallpaper scelto viene tradotto da userContent.css in uno sfondo FurrOS
-// dietro il wordmark; lo sfondo della pagina resta sempre #150B11.
+// The new tab "Customize" pencil shows wallpapers.
+// The selected wallpaper is translated by userContent.css into a FurrOS
+// background behind the wordmark; the page background stays #150B11.
 user_pref("browser.newtabpage.activity-stream.newtabWallpapers.enabled", true);
 user_pref("browser.newtabpage.activity-stream.newtabWallpapers.user.enabled", true);
 
-// Niente scorciatoie, storie, meteo e widget nella nuova scheda
+// No shortcuts, stories, weather or widgets on the new tab page
 user_pref("browser.newtabpage.activity-stream.feeds.topsites", false);
 user_pref("browser.newtabpage.activity-stream.feeds.section.topstories", false);
 user_pref("browser.newtabpage.activity-stream.feeds.section.highlights", false);
@@ -30,5 +30,5 @@ user_pref("browser.newtabpage.activity-stream.spaces.widgetsOptOut", true);
 user_pref("browser.newtabpage.activity-stream.spaces.storiesOptOut", true);
 user_pref("browser.newtabpage.activity-stream.spaces.activityOptOut", true);
 
-// Sfondo dietro il wordmark FurrOS: passa a true per attivarlo (di default spento)
+// Background behind the FurrOS wordmark: set to true to enable (off by default)
 user_pref("furr.newtab.wordmark.background", false);
