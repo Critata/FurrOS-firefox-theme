@@ -18,19 +18,27 @@ chmod +x install.sh
 ./install.sh
 ```
 
+**Close Firefox completely before running the installer.** The theme files are read only when Firefox starts. If Firefox is still running, the script stops with an error.
+
 If you have multiple profiles or want to choose one manually:
 
 ```bash
 ./install.sh --profile /home/username/.config/mozilla/firefox/xxxx.default-release
 ```
 
+Use `--force` only if you know what you are doing and want to install while Firefox is running:
+
+```bash
+./install.sh --force
+```
+
 The installer:
 
-1. detects the default Firefox profile;
+1. detects the default Firefox profile (including Snap and Flatpak installs) or asks you to choose;
 2. creates the `chrome` folder if needed;
 3. backs up the existing `userChrome.css`, `userContent.css` and `user.js` with a `.bak-DATE-TIME` suffix;
-4. copies the theme files;
-5. asks you to restart Firefox.
+4. copies the theme files and verifies them;
+5. asks you to start Firefox again.
 
 ## Uninstall
 
@@ -38,7 +46,7 @@ The installer:
 ./install.sh --uninstall
 ```
 
-This removes the three theme files. Your backups are kept in the profile.
+Close Firefox first. This removes the three theme files. Your backups are kept in the profile.
 
 ## Important notes
 
