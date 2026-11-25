@@ -12,6 +12,7 @@ import configparser
 import hashlib
 import os
 import platform
+import secrets
 import shutil
 import subprocess
 import sys
@@ -274,6 +275,53 @@ def ensure_firefox(skip: bool) -> None:
     print("Firefox installed successfully.")
 
 
+def create_firefox_profile() -> None:
+    if candidate_ini_files():
+        return
+
+    system = platform.system()
+    if system == "Windows":
+        appdata = os.environ.get("APPDATA", str(Path.home() / "AppData" / "Roaming"))
+        base = Path(appdata) / "Mozilla" / "Firefox" / "Profiles"
+    elif system == "Darwin":
+        base = Path.home() / "Library" / "Application Support" / "Firefox" / "Profiles"
+    elif shutil.which("flatpak") and command_works(
+        ["flatpak", "run", "org.mozilla.firefox"]
+    ):
+        base = Path.home() / ".var" / "app" / "org.mozilla.firefox" / ".mozilla" / "firefox"
+    elif shutil.which("snap") and command_works(["snap", "run", "firefox"]):
+        base = Path.home() / "snap" / "firefox" / "common" / ".mozilla" / "firefox"
+    else:
+        base = Path.home() / ".mozilla" / "firefox"
+
+    ini = base / "profiles.ini"
+    if ini.is_file() and "[Profile" in ini.read_text(encoding="utf-8", errors="ignore"):
+        return
+
+    base.mkdir(parents=True, exist_ok=True)
+    profile_id = secrets.token_hex(4)
+    profile_dir = f"{profile_id}.default-release"
+    (base / profile_dir).mkdir(parents=True, exist_ok=True)
+    ini.write_text(
+        "\n".join(
+            (
+                f"[Install{profile_id}]",
+                f"Default={profile_dir}",
+                "Locked=1",
+                "",
+                "[Profile0]",
+                "Name=default-release",
+                "IsRelative=1",
+                f"Path={profile_dir}",
+                "Default=1",
+                "",
+            )
+        ),
+        encoding="utf-8",
+    )
+    print(f"Created Firefox profile: {base / profile_dir}")
+
+
 def candidate_ini_files() -> list[Path]:
     home = Path.home()
     raw: list[Path] = []
@@ -475,6 +523,7 @@ def main() -> None:
 
     if not args.uninstall:
         ensure_firefox(args.skip_firefox_install)
+        create_firefox_profile()
 
     if not args.force and firefox_running():
         raise SystemExit(

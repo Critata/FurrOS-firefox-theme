@@ -251,8 +251,47 @@ ensure_firefox() {
   echo "Firefox installed successfully."
 }
 
+create_firefox_profile() {
+  local base ini id dir
+
+  if [[ "$(uname -s)" == "Darwin" ]]; then
+    base="$HOME/Library/Application Support/Firefox/Profiles"
+  elif command -v flatpak >/dev/null 2>&1 \
+    && flatpak run org.mozilla.firefox --version >/dev/null 2>&1; then
+    base="$HOME/.var/app/org.mozilla.firefox/.mozilla/firefox"
+  elif command -v snap >/dev/null 2>&1 \
+    && snap run firefox --version >/dev/null 2>&1; then
+    base="$HOME/snap/firefox/common/.mozilla/firefox"
+  else
+    base="$HOME/.mozilla/firefox"
+  fi
+
+  ini="$base/profiles.ini"
+  if [[ -f "$ini" ]] && grep -q '^\[Profile' "$ini"; then
+    return 0
+  fi
+
+  id="$(openssl rand -hex 4 2>/dev/null || printf 'furros%s' "$$")"
+  id="${id:0:8}"
+  dir="${id}.default-release"
+  mkdir -p "$base/$dir"
+  cat > "$ini" <<EOF
+[Install$id]
+Default=$dir
+Locked=1
+
+[Profile0]
+Name=default-release
+IsRelative=1
+Path=$dir
+Default=1
+EOF
+  echo "Created Firefox profile: $base/$dir"
+}
+
 if [[ "$UNINSTALL" -ne 1 ]]; then
   ensure_firefox
+  create_firefox_profile
 fi
 
 if [[ "$FORCE" -ne 1 ]] && firefox_running; then

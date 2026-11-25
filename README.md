@@ -51,12 +51,13 @@ Use `--force` (or `-Force` in PowerShell) only if you know what you are doing an
 The installer:
 
 1. installs Firefox if it is missing;
-2. detects the default Firefox profile (Linux, macOS, Windows, Snap and Flatpak) or asks you to choose;
-3. creates the `chrome` folder if needed;
-4. backs up the existing `userChrome.css`, `userContent.css` and `user.js` with a `.bak-DATE-TIME` suffix;
-5. copies the theme files and verifies them byte-for-byte;
-6. verifies that `user.js` enables custom stylesheets;
-7. asks you to start Firefox again.
+2. creates an initial Firefox profile if Firefox has never been started;
+3. detects the default Firefox profile (Linux, macOS, Windows, Snap and Flatpak) or asks you to choose;
+4. creates the `chrome` folder if needed;
+5. backs up the existing `userChrome.css`, `userContent.css` and `user.js` with a `.bak-DATE-TIME` suffix;
+6. copies the theme files and verifies them byte-for-byte;
+7. verifies that `user.js` enables custom stylesheets;
+8. asks you to start Firefox again.
 
 ## Uninstall
 

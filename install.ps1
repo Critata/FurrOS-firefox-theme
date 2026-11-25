@@ -99,6 +99,38 @@ function Ensure-Firefox {
   Write-Host 'Firefox installed successfully.'
 }
 
+function Initialize-FirefoxProfile {
+  $profilesIni = Join-Path $env:APPDATA 'Mozilla\Firefox\Profiles\profiles.ini'
+  $base = Split-Path -Parent $profilesIni
+
+  if (Test-Path -LiteralPath $profilesIni -PathType Leaf) {
+    if (Select-String -LiteralPath $profilesIni -Pattern '^\[Profile' -Quiet) { return }
+  }
+
+  New-Item -ItemType Directory -Path $base -Force | Out-Null
+  $id = -join (1..8 | ForEach-Object {
+    $index = Get-Random -Minimum 0 -Maximum 36
+    '0123456789abcdefghijklmnopqrstuvwxyz'[$index]
+  })
+  $dir = "$id.default-release"
+  New-Item -ItemType Directory -Path (Join-Path $base $dir) -Force | Out-Null
+
+  $lines = @(
+    "[Install$id]",
+    "Default=$dir",
+    'Locked=1',
+    '',
+    '[Profile0]',
+    'Name=default-release',
+    'IsRelative=1',
+    "Path=$dir",
+    'Default=1',
+    ''
+  )
+  Set-Content -LiteralPath $profilesIni -Value $lines -Encoding ASCII
+  Write-Host "Created Firefox profile: $(Join-Path $base $dir)"
+}
+
 function Test-FirefoxRunning {
   $processes = Get-Process -ErrorAction SilentlyContinue | Where-Object {
     $_.ProcessName -like 'firefox*'
@@ -270,6 +302,7 @@ try {
 
   if (-not $Uninstall) {
     Ensure-Firefox -Skip $SkipFirefoxInstall
+    Initialize-FirefoxProfile
   }
 
   if (-not $Force -and (Test-FirefoxRunning)) {
