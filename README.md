@@ -8,6 +8,8 @@ A Firefox theme inspired by [FurrOS](https://furros.xyz/): dark chrome, chips wi
 - `userContent.css` — internal pages: wordmark, embedded FurrOS wallpapers, AI chatbot styles.
 - `user.js` — required preferences (`toolkit.legacyUserProfileCustomizations.stylesheets`, dark theme, wallpapers, disabled shortcuts/stories/widgets).
 - `install.sh` — installer that backs up your existing files.
+- `install.desktop` — desktop launcher that opens a terminal and runs the installer.
+- `diagnose.sh` — prints system/profile information if the install fails.
 
 ## Installation
 
@@ -19,6 +21,8 @@ chmod +x install.sh
 ```
 
 **Close Firefox completely before running the installer.** The theme files are read only when Firefox starts. If Firefox is still running, the script stops with an error.
+
+On Linux you can also double-click `install.desktop`: it opens a terminal and runs the installer for you. The script writes a detailed report to `~/FurrOS-install-report.txt`.
 
 If you have multiple profiles or want to choose one manually:
 
@@ -54,6 +58,16 @@ Close Firefox first. This removes the three theme files. Your backups are kept i
 - The new tab page uses `#150B11` as its background. Wallpaper tiles from the customize pencil are translated into three embedded FurrOS images behind the wordmark.
 - Uploading your own image does not apply a background: the wordmark stays without any extra background image.
 - Tested on Firefox 161, Linux/Wayland. Other versions may need small adjustments.
+
+## Troubleshooting
+
+If nothing changes after the install:
+
+1. Confirm Firefox was fully closed before running the installer.
+2. Run `./diagnose.sh` and check which profile list is detected.
+3. Open `~/FurrOS-install-report.txt`: it shows the exact profile and files installed.
+4. Start Firefox again; the theme is applied only at startup.
+5. If the profile is unusual, run: `./install.sh --profile /full/path/to/profile`.
 
 ## Release
 

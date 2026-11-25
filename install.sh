@@ -5,10 +5,24 @@
 
 set -euo pipefail
 
-SRC="$(cd "$(dirname "$0")" && pwd)"
+echo "FurrOS Firefox theme installer — starting..."
+
+# If launched from a file manager without a terminal, reopen inside one.
+if [[ ! -t 0 ]]; then
+  for TERM_CMD in x-terminal-emulator gnome-terminal konsole xfce4-terminal tilix kitty alacritty xterm; do
+    if command -v "$TERM_CMD" >/dev/null 2>&1; then
+      exec "$TERM_CMD" -e bash "$0" "$@"
+    fi
+  done
+fi
+
+SOURCE_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROFILE=""
 UNINSTALL=0
 FORCE=0
+REPORT="$HOME/FurrOS-install-report.txt"
+
+trap 'code=$?; if [[ $code -ne 0 ]]; then echo; echo "INSTALL FAILED (exit $code)."; echo "Report: $REPORT"; [[ -t 0 ]] && read -rp "Press Enter to close..." || true; fi' EXIT
 
 usage() {
   cat <<'EOF'
@@ -64,11 +78,13 @@ if [[ -z "$PROFILE" ]]; then
   PROFILES=()
   declare -A SEEN=()
   for INI in \
+    "$HOME/.mozilla/firefox/profiles.ini" \
     "$HOME/.config/mozilla/firefox/profiles.ini" \
     "$HOME/snap/firefox/common/.mozilla/firefox/profiles.ini" \
     "$HOME/.var/app/org.mozilla.firefox/.mozilla/firefox/profiles.ini" \
     "$HOME/Library/Application Support/Firefox/Profiles/profiles.ini"; do
     [[ -f "$INI" ]] || continue
+    echo "Found profile list: $INI"
     while IFS= read -r p; do
       [[ -n "$p" && -d "$p" ]] || continue
       [[ -n "${SEEN[$p]:-}" ]] && continue
@@ -121,6 +137,12 @@ if [[ "$UNINSTALL" -eq 1 ]]; then
   rm -f "$CHROME/userChrome.css" "$CHROME/userContent.css" "$PROFILE/user.js"
   echo "FurrOS theme removed from: $PROFILE"
   echo "Start Firefox again to apply the change."
+  {
+    echo "FurrOS uninstall report"
+    echo "Profile: $PROFILE"
+    echo "Removed: userChrome.css, userContent.css, user.js"
+  } > "$REPORT"
+  echo "Report saved: $REPORT"
   exit 0
 fi
 
@@ -134,18 +156,32 @@ if [[ -f "$PROFILE/user.js" ]]; then
   cp "$PROFILE/user.js" "$PROFILE/user.js.bak-$TS"
 fi
 
-cp "$SRC/userChrome.css" "$CHROME/userChrome.css"
-cp "$SRC/userContent.css" "$CHROME/userContent.css"
-cp "$SRC/user.js" "$PROFILE/user.js"
+cp "$SOURCE_DIR/userChrome.css" "$CHROME/userChrome.css"
+cp "$SOURCE_DIR/userContent.css" "$CHROME/userContent.css"
+cp "$SOURCE_DIR/user.js" "$PROFILE/user.js"
 
 for f in userChrome.css userContent.css; do
-  cmp -s "$SRC/$f" "$CHROME/$f" || { echo "Error: copy failed for $f" >&2; exit 1; }
+  cmp -s "$SOURCE_DIR/$f" "$CHROME/$f" || { echo "Error: copy failed for $f" >&2; exit 1; }
 done
-cmp -s "$SRC/user.js" "$PROFILE/user.js" || { echo "Error: copy failed for user.js" >&2; exit 1; }
+cmp -s "$SOURCE_DIR/user.js" "$PROFILE/user.js" || { echo "Error: copy failed for user.js" >&2; exit 1; }
+
+{
+  echo "FurrOS Firefox theme installation report"
+  echo "Date:        $(date)"
+  echo "User:        $USER"
+  echo "Home:        $HOME"
+  echo "Source:      $SOURCE_DIR"
+  echo "Profile:     $PROFILE"
+  echo "Firefox:     $(firefox --version 2>/dev/null || echo 'firefox --version unavailable')"
+  echo "Backup:      .bak-$TS"
+  echo "Installed files:"
+  ls -l "$CHROME/userChrome.css" "$CHROME/userContent.css" "$PROFILE/user.js"
+} > "$REPORT"
 
 echo
 echo "FurrOS theme installed in: $PROFILE"
 echo "Previous files backed up with suffix .bak-$TS"
 echo "Verified: all three theme files match the repository."
+echo "Report saved: $REPORT"
 echo
 echo "Now start Firefox. If it was open, close it completely first."
