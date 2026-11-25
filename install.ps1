@@ -100,12 +100,16 @@ function Ensure-Firefox {
 }
 
 function Initialize-FirefoxProfile {
-  $profilesIni = Join-Path $env:APPDATA 'Mozilla\Firefox\Profiles\profiles.ini'
-  $base = Split-Path -Parent $profilesIni
-
-  if (Test-Path -LiteralPath $profilesIni -PathType Leaf) {
-    if (Select-String -LiteralPath $profilesIni -Pattern '^\[Profile' -Quiet) { return }
+  # Never create a second profile: Firefox may already use one in another
+  # standard location.
+  foreach ($ini in (Get-IniCandidates)) {
+    if (Select-String -LiteralPath $ini -Pattern '^\[Profile' -Quiet) { return }
   }
+
+  $appData = $env:APPDATA
+  if (-not $appData) { $appData = Join-Path $env:USERPROFILE 'AppData\Roaming' }
+  $profilesIni = Join-Path $appData 'Mozilla\Firefox\Profiles\profiles.ini'
+  $base = Split-Path -Parent $profilesIni
 
   New-Item -ItemType Directory -Path $base -Force | Out-Null
   $id = -join (1..8 | ForEach-Object {
@@ -167,7 +171,7 @@ function Get-IniCandidates {
 }
 
 function ConvertTo-ProfileObject {
-  param([string]$Base, [hashtable]$Data)
+  param([string]$Base, [hashtable]$Data, [string[]]$InstallDefaults = @())
   if (-not $Data.ContainsKey('Path')) { return $null }
 
   $expanded = [Environment]::ExpandEnvironmentVariables($Data['Path'])
@@ -185,7 +189,15 @@ function ConvertTo-ProfileObject {
   $isDefault = $false
   if ($Data.ContainsKey('Default') -and $Data['Default'] -eq '1') { $isDefault = $true }
 
-  return [pscustomobject]@{ Name = $name; Path = $path; Default = $isDefault }
+  # Firefox's real default is declared in [Install...], not in the legacy
+  # [Profile...] Default=1 flag.
+  $score = 1
+  if ($isDefault) { $score = 2 }
+  foreach ($defaultPath in $InstallDefaults) {
+    if ($defaultPath -eq $path) { $score = 3 }
+  }
+
+  return [pscustomobject]@{ Name = $name; Path = $path; Default = $isDefault; Score = $score }
 }
 
 function Read-Profiles {
@@ -194,28 +206,40 @@ function Read-Profiles {
   $profiles = @()
   $section = ''
   $data = @{}
+  $installDefaults = @()
 
   foreach ($line in (Get-Content -LiteralPath $Ini)) {
     $trimmed = $line.Trim()
     if ($trimmed -match '^\[(.+)\]$') {
       if ($section -like 'Profile*') {
-        $item = ConvertTo-ProfileObject -Base $base -Data $data
+        $item = ConvertTo-ProfileObject -Base $base -Data $data -InstallDefaults $installDefaults
         if ($item) { $profiles += $item }
       }
       $section = $matches[1]
       $data = @{}
       continue
     }
-    if ($section -like 'Profile*' -and $trimmed -match '^([^=]+)=(.*)$') {
-      $data[$matches[1].Trim()] = $matches[2].Trim()
+    if ($trimmed -match '^([^=]+)=(.*)$') {
+      $key = $matches[1].Trim()
+      $value = $matches[2].Trim()
+      if ($section -like 'Install*' -and $key -eq 'Default') {
+        if ([IO.Path]::IsPathRooted($value)) {
+          $installDefaults += [IO.Path]::GetFullPath($value)
+        } else {
+          $installDefaults += [IO.Path]::GetFullPath((Join-Path $base $value))
+        }
+        continue
+      }
+      if ($section -like 'Profile*') {
+        $data[$key] = $value
+      }
     }
   }
   if ($section -like 'Profile*') {
-    $item = ConvertTo-ProfileObject -Base $base -Data $data
+    $item = ConvertTo-ProfileObject -Base $base -Data $data -InstallDefaults $installDefaults
     if ($item) { $profiles += $item }
   }
 
-  $profiles = $profiles | Sort-Object -Property @{ Expression = { -not $_.Default } }
   return $profiles
 }
 
@@ -246,20 +270,37 @@ function Choose-Profile {
   if ($all.Count -eq 0) {
     throw "Error: Firefox profile not found.`nSpecify it with: powershell -File install.ps1 -Profile 'C:\path\to\profile'"
   }
+
+  $all = $all | Sort-Object -Property @{ Expression = { $_.Score } } -Descending
   if ($all.Count -eq 1) { return $all[0].Path }
 
+  $topScore = $all[0].Score
+  $top = @()
+  $rest = @()
+  foreach ($item in $all) {
+    if ($item.Score -eq $topScore) { $top += $item } else { $rest += $item }
+  }
+  if ($top.Count -eq 1) {
+    Write-Host "Selected profile: $($top[0].Path)"
+    return $top[0].Path
+  }
+
+  $choices = @($top) + @($rest)
   Write-Host ''
   Write-Host 'Multiple Firefox profiles found:'
-  for ($i = 0; $i -lt $all.Count; $i++) {
+  for ($i = 0; $i -lt $choices.Count; $i++) {
     $marker = ''
-    if ($all[$i].Default) { $marker = ' (default)' }
-    Write-Host ('  {0}. {1}{2} - {3}' -f ($i + 1), $all[$i].Name, $marker, $all[$i].Path)
+    switch ($choices[$i].Score) {
+      3 { $marker = ' (default)' }
+      2 { $marker = ' (legacy default)' }
+    }
+    Write-Host ('  {0}. {1}{2} - {3}' -f ($i + 1), $choices[$i].Name, $marker, $choices[$i].Path)
   }
   while ($true) {
     $answer = Read-Host 'Choose the profile number'
     $number = 0
-    if ([int]::TryParse($answer, [ref]$number) -and $number -ge 1 -and $number -le $all.Count) {
-      return $all[$number - 1].Path
+    if ([int]::TryParse($answer, [ref]$number) -and $number -ge 1 -and $number -le $choices.Count) {
+      return $choices[$number - 1].Path
     }
     Write-Host 'Invalid choice.'
   }

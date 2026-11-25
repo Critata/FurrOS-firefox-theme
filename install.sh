@@ -133,50 +133,51 @@ run_as_root() {
 }
 
 install_firefox_linux() {
+  # Prefer a real browser package over transitional wrappers. Ubuntu/Zorin
+  # ship an apt "firefox" package that only points to Snap.
+  if command -v snap >/dev/null 2>&1; then
+    run_as_root snap install firefox || true
+    firefox_ready && return 0
+  fi
+  if command -v flatpak >/dev/null 2>&1; then
+    flatpak install -y flathub org.mozilla.firefox || true
+    firefox_ready && return 0
+  fi
+
   if command -v apt-get >/dev/null 2>&1; then
-    run_as_root apt-get update
-    run_as_root apt-get install -y firefox
+    run_as_root apt-get update || true
+    run_as_root apt-get install -y firefox || true
   elif command -v dnf >/dev/null 2>&1; then
-    run_as_root dnf install -y firefox
+    run_as_root dnf install -y firefox || true
   elif command -v yum >/dev/null 2>&1; then
-    run_as_root yum install -y firefox
+    run_as_root yum install -y firefox || true
   elif command -v zypper >/dev/null 2>&1; then
-    run_as_root zypper --non-interactive install firefox
+    run_as_root zypper --non-interactive install firefox || true
   elif command -v pacman >/dev/null 2>&1; then
-    run_as_root pacman -S --noconfirm firefox
+    run_as_root pacman -S --noconfirm firefox || true
   elif command -v apk >/dev/null 2>&1; then
-    run_as_root apk add firefox
+    run_as_root apk add firefox || true
   elif command -v xbps-install >/dev/null 2>&1; then
-    run_as_root xbps-install -Sy firefox
-  elif command -v flatpak >/dev/null 2>&1; then
-    flatpak install -y flathub org.mozilla.firefox
-  elif command -v snap >/dev/null 2>&1; then
-    run_as_root snap install firefox
-  else
-    return 1
+    run_as_root xbps-install -Sy firefox || true
   fi
 
   if firefox_ready; then
     return 0
   fi
 
-  # Ubuntu/Zorin install a small transitional "firefox" package that points
-  # to Snap. If that happened, install the real browser from Snap/Flatpak.
+  # The apt package may have installed a small transitional package. Install
+  # the real browser from Snap/Flatpak as a fallback.
   echo "Firefox package installed, but the browser is not usable yet. Trying Snap/Flatpak..."
-  if command -v flatpak >/dev/null 2>&1; then
-    flatpak install -y flathub org.mozilla.firefox || true
-    if firefox_ready; then
-      return 0
-    fi
-  fi
   if ! command -v snap >/dev/null 2>&1 && command -v apt-get >/dev/null 2>&1; then
     run_as_root apt-get install -y snapd || true
   fi
   if command -v snap >/dev/null 2>&1; then
     run_as_root snap install firefox || true
-    if firefox_ready; then
-      return 0
-    fi
+    firefox_ready && return 0
+  fi
+  if command -v flatpak >/dev/null 2>&1; then
+    flatpak install -y flathub org.mozilla.firefox || true
+    firefox_ready && return 0
   fi
 
   return 1
@@ -251,8 +252,29 @@ ensure_firefox() {
   echo "Firefox installed successfully."
 }
 
+profile_ini_candidates() {
+  printf '%s\n' \
+    "$HOME/.mozilla/firefox/profiles.ini" \
+    "${XDG_CONFIG_HOME:-$HOME/.config}/mozilla/firefox/profiles.ini" \
+    "$HOME/.config/mozilla/firefox/profiles.ini" \
+    "$HOME/snap/firefox/common/.mozilla/firefox/profiles.ini" \
+    "$HOME/.var/app/org.mozilla.firefox/.mozilla/firefox/profiles.ini" \
+    "$HOME/Library/Application Support/Firefox/Profiles/profiles.ini"
+}
+
 create_firefox_profile() {
-  local base ini id dir
+  local candidate base ini id dir found=0
+
+  # Never create a second profile: Firefox may already use a profile in a
+  # different standard location (for example ~/.config/mozilla/firefox).
+  while IFS= read -r candidate; do
+    [[ -f "$candidate" ]] || continue
+    if grep -q '^\[Profile' "$candidate"; then
+      found=1
+      break
+    fi
+  done < <(profile_ini_candidates)
+  [[ "$found" -eq 1 ]] && return 0
 
   if [[ "$(uname -s)" == "Darwin" ]]; then
     base="$HOME/Library/Application Support/Firefox/Profiles"
@@ -263,14 +285,10 @@ create_firefox_profile() {
     && snap run firefox --version >/dev/null 2>&1; then
     base="$HOME/snap/firefox/common/.mozilla/firefox"
   else
-    base="$HOME/.mozilla/firefox"
+    base="${XDG_CONFIG_HOME:-$HOME/.config}/mozilla/firefox"
   fi
 
   ini="$base/profiles.ini"
-  if [[ -f "$ini" ]] && grep -q '^\[Profile' "$ini"; then
-    return 0
-  fi
-
   id="$(openssl rand -hex 4 2>/dev/null || printf 'furros%s' "$$")"
   id="${id:0:8}"
   dir="${id}.default-release"
@@ -302,17 +320,60 @@ if [[ "$FORCE" -ne 1 ]] && firefox_running; then
   exit 1
 fi
 
+running_profile() {
+  local link target rest profile prefix candidate
+
+  [[ -d /proc ]] || return 1
+  for link in /proc/[0-9]*/fd/*; do
+    [[ -L "$link" ]] || continue
+    target="$(readlink "$link" 2>/dev/null)" || continue
+
+    case "$target" in
+      */mozilla/firefox/*)
+        rest="${target#*/mozilla/firefox/}"
+        profile="${rest%%/*}"
+        prefix="${target%%/mozilla/firefox/*}"
+        candidate="$prefix/mozilla/firefox/$profile"
+        ;;
+      */Mozilla/Firefox/Profiles/*)
+        rest="${target#*/Mozilla/Firefox/Profiles/}"
+        profile="${rest%%/*}"
+        prefix="${target%%/Mozilla/Firefox/Profiles/*}"
+        candidate="$prefix/Mozilla/Firefox/Profiles/$profile"
+        ;;
+      *)
+        continue
+        ;;
+    esac
+
+    case "$profile" in
+      *.default*|Profile*) ;;
+      *) continue ;;
+    esac
+    [[ -d "$candidate" ]] || continue
+    [[ "$candidate" != */.cache/* ]] || continue
+    [[ -f "$candidate/prefs.js" || -f "$candidate/user.js" ]] || continue
+    printf '%s\n' "$candidate"
+    return 0
+  done
+  return 1
+}
+
 trim() {
   printf '%s' "$1" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//'
 }
 
 PROFILES=()
 INIS=()
+INSTALL_DEFAULTS=()
 
 add_ini() {
-  if [[ -f "$1" ]]; then
-    INIS+=("$1")
-  fi
+  local existing
+  [[ -f "$1" ]] || return 0
+  for existing in "${INIS[@]}"; do
+    [[ "$existing" == "$1" ]] && return 0
+  done
+  INIS+=("$1")
   return 0
 }
 
@@ -344,39 +405,62 @@ emit_profile() {
 }
 
 parse_ini() {
-  local ini="$1" base line key value path name default in_section=0
+  local ini="$1" base line key value path name default section="" resolved
+
   base="$(cd "$(dirname "$ini")" && pwd -P)"
   path=""
   name=""
   default=0
 
+  finish_profile() {
+    if [[ "$section" == Profile* && -n "$path" ]]; then
+      emit_profile "$base" "$path" "$name" "$default"
+    fi
+    path=""
+    name=""
+    default=0
+  }
+
   while IFS= read -r line || [[ -n "$line" ]]; do
     line="$(trim "$line")"
     case "$line" in
-      \[Profile*)
-        if [[ "$in_section" -eq 1 && -n "$path" ]]; then
-          emit_profile "$base" "$path" "$name" "$default"
-        fi
-        in_section=1
-        path=""
-        name=""
-        default=0
+      \[Profile*\])
+        finish_profile
+        section="Profile"
         continue
         ;;
-      \[*)
-        if [[ "$in_section" -eq 1 && -n "$path" ]]; then
-          emit_profile "$base" "$path" "$name" "$default"
-        fi
-        in_section=0
+      \[Install*\])
+        finish_profile
+        section="Install"
+        continue
+        ;;
+      \[*\])
+        finish_profile
+        section=""
         continue
         ;;
     esac
 
-    [[ "$in_section" -eq 1 ]] || continue
     [[ "$line" == *=* ]] || continue
     key="$(trim "${line%%=*}")"
     value="$(trim "${line#*=}")"
 
+    # Firefox's real default is declared in [Install...], not in the legacy
+    # [Profile...] Default=1 flag.
+    if [[ "$section" == "Install" && "$key" == "Default" ]]; then
+      if [[ "$value" == /* ]]; then
+        resolved="$value"
+      else
+        resolved="$base/$value"
+      fi
+      if [[ -d "$resolved" ]]; then
+        resolved="$(cd "$(dirname "$resolved")" && printf '%s/%s' "$(pwd -P)" "$(basename "$resolved")")"
+      fi
+      INSTALL_DEFAULTS+=("$resolved")
+      continue
+    fi
+
+    [[ "$section" == "Profile" ]] || continue
     case "$key" in
       Path) path="$value" ;;
       Name) name="$value" ;;
@@ -384,17 +468,13 @@ parse_ini() {
     esac
   done < "$ini"
 
-  if [[ "$in_section" -eq 1 && -n "$path" ]]; then
-    emit_profile "$base" "$path" "$name" "$default"
-  fi
+  finish_profile
 }
 
 if [[ -z "$PROFILE" ]]; then
-  add_ini "$HOME/.mozilla/firefox/profiles.ini"
-  add_ini "$HOME/.config/mozilla/firefox/profiles.ini"
-  add_ini "$HOME/snap/firefox/common/.mozilla/firefox/profiles.ini"
-  add_ini "$HOME/.var/app/org.mozilla.firefox/.mozilla/firefox/profiles.ini"
-  add_ini "$HOME/Library/Application Support/Firefox/Profiles/profiles.ini"
+  while IFS= read -r candidate; do
+    add_ini "$candidate"
+  done < <(profile_ini_candidates)
 
   for ini in "${INIS[@]}"; do
     echo "Found profile list: $ini"
@@ -407,30 +487,75 @@ if [[ -z "$PROFILE" ]]; then
     exit 1
   fi
 
-  DEFAULT=()
-  OTHER=()
+  ACTIVE=""
+  [[ "$FORCE" -eq 1 ]] && ACTIVE="$(running_profile || true)"
+
+  # Score: 4 = currently running, 3 = Firefox [Install] default,
+  # 2 = legacy [Profile] Default=1, 1 = other profile.
+  SCORED=()
   for entry in "${PROFILES[@]}"; do
-    if [[ "${entry%%$'\t'*}" == "1" ]]; then
-      DEFAULT+=("$entry")
+    flag="${entry%%$'\t'*}"
+    rest="${entry#*$'\t'}"
+    name="${rest%%$'\t'*}"
+    path="${rest##*$'\t'}"
+
+    score=1
+    [[ "$flag" == "1" ]] && score=2
+    for default_path in "${INSTALL_DEFAULTS[@]}"; do
+      [[ "$default_path" == "$path" ]] && score=3
+    done
+    [[ -n "$ACTIVE" && "$ACTIVE" == "$path" ]] && score=4
+
+    SCORED+=("$score"$'\t'"$name"$'\t'"$path")
+  done
+
+  if [[ -n "$ACTIVE" ]]; then
+    known=0
+    for entry in "${SCORED[@]}"; do
+      [[ "${entry##*$'\t'}" == "$ACTIVE" ]] && known=1
+    done
+    if [[ "$known" -eq 0 ]]; then
+      SCORED+=("4"$'\t'"$(basename "$ACTIVE")"$'\t'"$ACTIVE")
+    fi
+  fi
+
+  ORDERED=()
+  for score in 4 3 2 1; do
+    for entry in "${SCORED[@]}"; do
+      [[ "${entry%%$'\t'*}" == "$score" ]] && ORDERED+=("$entry")
+    done
+  done
+
+  TOP=()
+  REST=()
+  top_score="${ORDERED[0]%%$'\t'*}"
+  for entry in "${ORDERED[@]}"; do
+    if [[ "${entry%%$'\t'*}" == "$top_score" ]]; then
+      TOP+=("$entry")
     else
-      OTHER+=("$entry")
+      REST+=("$entry")
     fi
   done
-  ORDERED=("${DEFAULT[@]}" "${OTHER[@]}")
 
-  if [[ ${#ORDERED[@]} -eq 1 ]]; then
-    PROFILE="${ORDERED[0]##*$'\t'}"
+  if [[ ${#TOP[@]} -eq 1 ]]; then
+    PROFILE="${TOP[0]##*$'\t'}"
+    echo "Selected profile: $PROFILE"
   else
+    CHOICES=("${TOP[@]}" "${REST[@]}")
     echo
     echo "Multiple Firefox profiles found:"
     LABELS=()
-    for entry in "${ORDERED[@]}"; do
-      flag="${entry%%$'\t'*}"
+    for entry in "${CHOICES[@]}"; do
+      score="${entry%%$'\t'*}"
       rest="${entry#*$'\t'}"
       name="${rest%%$'\t'*}"
       path="${rest##*$'\t'}"
       marker=""
-      [[ "$flag" == "1" ]] && marker=" (default)"
+      case "$score" in
+        4) marker=" (running)" ;;
+        3) marker=" (default)" ;;
+        2) marker=" (legacy default)" ;;
+      esac
       LABELS+=("$name$marker — $path")
     done
 
@@ -447,7 +572,7 @@ if [[ -z "$PROFILE" ]]; then
           break
         fi
       done
-      PROFILE="${ORDERED[$((index - 1))]##*$'\t'}"
+      PROFILE="${CHOICES[$((index - 1))]##*$'\t'}"
       break
     done
   fi

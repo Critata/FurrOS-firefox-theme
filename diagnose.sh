@@ -18,17 +18,45 @@ firefox --version 2>&1 || echo "  not found in PATH"
 echo
 
 echo "Profile lists found:"
+SEEN_INIS=()
 for INI in \
   "$HOME/.mozilla/firefox/profiles.ini" \
+  "${XDG_CONFIG_HOME:-$HOME/.config}/mozilla/firefox/profiles.ini" \
   "$HOME/.config/mozilla/firefox/profiles.ini" \
   "$HOME/snap/firefox/common/.mozilla/firefox/profiles.ini" \
   "$HOME/.var/app/org.mozilla.firefox/.mozilla/firefox/profiles.ini" \
   "$HOME/Library/Application Support/Firefox/Profiles/profiles.ini"; do
-  if [[ -f "$INI" ]]; then
-    echo "  $INI"
-    grep -E '^(Path|Default|Name)=' "$INI" | sed 's/^/    /'
-  fi
+  [[ -f "$INI" ]] || continue
+  DUPLICATE=0
+  for SEEN in "${SEEN_INIS[@]}"; do
+    [[ "$SEEN" == "$INI" ]] && DUPLICATE=1
+  done
+  [[ "$DUPLICATE" -eq 0 ]] || continue
+  SEEN_INIS+=("$INI")
+  echo "  $INI"
+  grep -E '^\[(Profile|Install)|^(Path|Default|Name)=' "$INI" | sed 's/^/    /'
 done
+echo
+
+echo "Profile used by running Firefox (if any):"
+FOUND=0
+for LINK in /proc/[0-9]*/fd/*; do
+  [[ -L "$LINK" ]] || continue
+  TARGET="$(readlink "$LINK" 2>/dev/null)" || continue
+  case "$TARGET" in
+    */mozilla/firefox/*|*/Mozilla/Firefox/Profiles/*)
+      case "$TARGET" in
+        */.cache/*) continue ;;
+      esac
+      if [[ -f "${TARGET%/*}/prefs.js" ]]; then
+        echo "  ${TARGET%/*}"
+        FOUND=1
+        break
+      fi
+      ;;
+  esac
+done
+[[ "$FOUND" -eq 1 ]] || echo "  none"
 echo
 
 echo "Theme source files:"

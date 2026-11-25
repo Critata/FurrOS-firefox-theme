@@ -135,48 +135,52 @@ def run_as_root(command: list[str]) -> None:
 
 
 def install_firefox_linux() -> None:
-    managers = (
-        ("apt-get", (("apt-get", "update"), ("apt-get", "install", "-y", "firefox"))),
-        ("dnf", (("dnf", "install", "-y", "firefox"),)),
-        ("yum", (("yum", "install", "-y", "firefox"),)),
-        ("zypper", (("zypper", "--non-interactive", "install", "firefox"),)),
-        ("pacman", (("pacman", "-S", "--noconfirm", "firefox"),)),
-        ("apk", (("apk", "add", "firefox"),)),
-        ("xbps-install", (("xbps-install", "-Sy", "firefox"),)),
-    )
-    for name, commands in managers:
-        if shutil.which(name):
-            for command in commands:
-                run_as_root(list(command))
-            break
-
-    if firefox_ready():
-        return
-
-    # Ubuntu/Zorin install a small transitional "firefox" package that points
-    # to Snap. If that happened, install the real browser from Snap/Flatpak.
-    print("Firefox package installed, but the browser is not usable yet. Trying Snap/Flatpak...")
-    if not shutil.which("snap") and shutil.which("apt-get"):
+    def attempt(command: list[str], root: bool = False) -> bool:
         try:
-            run_as_root(["apt-get", "install", "-y", "snapd"])
-        except Exception:
-            pass
-    fallbacks = (
-        (["flatpak", "install", "-y", "flathub", "org.mozilla.firefox"], False),
-        (["snap", "install", "firefox"], True),
-    )
-    for command, needs_root in fallbacks:
-        if not shutil.which(command[0]):
-            continue
-        try:
-            if needs_root:
+            if root:
                 run_as_root(command)
             else:
                 subprocess.run(command, check=True)
         except Exception:
             pass
-        if firefox_ready():
-            return
+        return firefox_ready()
+
+    # Prefer a real browser package over Ubuntu/Zorin's transitional apt
+    # wrapper that only points to Snap.
+    if shutil.which("snap") and attempt(["snap", "install", "firefox"], True):
+        return
+    if shutil.which("flatpak") and attempt(
+        ["flatpak", "install", "-y", "flathub", "org.mozilla.firefox"]
+    ):
+        return
+
+    managers = (
+        ("apt-get", (["apt-get", "update"], ["apt-get", "install", "-y", "firefox"])),
+        ("dnf", (["dnf", "install", "-y", "firefox"],)),
+        ("yum", (["yum", "install", "-y", "firefox"],)),
+        ("zypper", (["zypper", "--non-interactive", "install", "firefox"],)),
+        ("pacman", (["pacman", "-S", "--noconfirm", "firefox"],)),
+        ("apk", (["apk", "add", "firefox"],)),
+        ("xbps-install", (["xbps-install", "-Sy", "firefox"],)),
+    )
+    for name, commands in managers:
+        if shutil.which(name):
+            for command in commands:
+                attempt(command, True)
+            break
+
+    if firefox_ready():
+        return
+
+    print("Firefox package installed, but the browser is not usable yet. Trying Snap/Flatpak...")
+    if not shutil.which("snap") and shutil.which("apt-get"):
+        attempt(["apt-get", "install", "-y", "snapd"], True)
+    if shutil.which("snap") and attempt(["snap", "install", "firefox"], True):
+        return
+    if shutil.which("flatpak") and attempt(
+        ["flatpak", "install", "-y", "flathub", "org.mozilla.firefox"]
+    ):
+        return
 
     raise RuntimeError("Firefox package did not provide a usable browser")
 
@@ -276,8 +280,14 @@ def ensure_firefox(skip: bool) -> None:
 
 
 def create_firefox_profile() -> None:
-    if candidate_ini_files():
-        return
+    # Never create a second profile: Firefox may already use one in another
+    # standard location (for example ~/.config/mozilla/firefox on Linux).
+    for candidate in candidate_ini_files():
+        try:
+            if "[Profile" in candidate.read_text(encoding="utf-8", errors="ignore"):
+                return
+        except OSError:
+            pass
 
     system = platform.system()
     if system == "Windows":
@@ -292,12 +302,10 @@ def create_firefox_profile() -> None:
     elif shutil.which("snap") and command_works(["snap", "run", "firefox"]):
         base = Path.home() / "snap" / "firefox" / "common" / ".mozilla" / "firefox"
     else:
-        base = Path.home() / ".mozilla" / "firefox"
+        config_home = os.environ.get("XDG_CONFIG_HOME") or str(Path.home() / ".config")
+        base = Path(config_home) / "mozilla" / "firefox"
 
     ini = base / "profiles.ini"
-    if ini.is_file() and "[Profile" in ini.read_text(encoding="utf-8", errors="ignore"):
-        return
-
     base.mkdir(parents=True, exist_ok=True)
     profile_id = secrets.token_hex(4)
     profile_dir = f"{profile_id}.default-release"
@@ -339,8 +347,10 @@ def candidate_ini_files() -> list[Path]:
             home / "Library" / "Application Support" / "Firefox" / "Profiles" / "profiles.ini"
         )
     else:
+        config_home = os.environ.get("XDG_CONFIG_HOME") or str(home / ".config")
         raw += [
             home / ".mozilla" / "firefox" / "profiles.ini",
+            Path(config_home) / "mozilla" / "firefox" / "profiles.ini",
             home / ".config" / "mozilla" / "firefox" / "profiles.ini",
             home / "snap" / "firefox" / "common" / ".mozilla" / "firefox" / "profiles.ini",
             home / ".var" / "app" / "org.mozilla.firefox" / ".mozilla" / "firefox" / "profiles.ini",
@@ -362,12 +372,59 @@ def candidate_ini_files() -> list[Path]:
     return result
 
 
-def read_profiles(ini: Path) -> list[tuple[str, Path, bool]]:
-    parser = configparser.ConfigParser()
+def active_profile() -> Path | None:
+    """Find the profile a running Firefox instance is using (Linux only)."""
+    proc = Path("/proc")
+    if not proc.exists():
+        return None
+
+    try:
+        fds = list(proc.glob("[0-9]*/fd/*"))
+    except OSError:
+        return None
+
+    for fd in fds:
+        try:
+            target = Path(os.readlink(fd))
+        except OSError:
+            continue
+        text = str(target)
+        for marker in ("/mozilla/firefox/", "/Mozilla/Firefox/Profiles/"):
+            if marker not in text:
+                continue
+            prefix, _, rest = text.partition(marker)
+            profile_name = rest.split("/", 1)[0]
+            if not (profile_name.endswith(".default") or ".default-" in profile_name or profile_name.startswith("Profile")):
+                continue
+            candidate = Path(prefix) / marker.strip("/") / profile_name
+            if "/.cache/" in str(candidate):
+                continue
+            if candidate.is_dir() and (candidate / "prefs.js").is_file():
+                return candidate
+    return None
+
+
+def read_profiles(ini: Path) -> list[dict[str, object]]:
+    parser = configparser.ConfigParser(strict=False)
     parser.read(ini)
     base = ini.parent
-    found: list[tuple[str, Path, bool]] = []
 
+    install_defaults: set[Path] = set()
+    for section in parser.sections():
+        if not section.lower().startswith("install"):
+            continue
+        raw = parser.get(section, "Default", fallback="").strip()
+        if not raw:
+            continue
+        path = Path(os.path.expandvars(raw)).expanduser()
+        if not path.is_absolute():
+            path = base / path
+        try:
+            install_defaults.add(path.resolve())
+        except OSError:
+            install_defaults.add(path)
+
+    found: list[dict[str, object]] = []
     for section in parser.sections():
         if not section.lower().startswith("profile"):
             continue
@@ -378,31 +435,44 @@ def read_profiles(ini: Path) -> list[tuple[str, Path, bool]]:
         path = Path(os.path.expandvars(raw)).expanduser()
         if not path.is_absolute():
             path = base / path
+        try:
+            resolved = path.resolve()
+        except OSError:
+            resolved = path
         name = parser.get(section, "Name", fallback=path.name)
-        default = parser.get(section, "Default", fallback="0") == "1"
+        legacy_default = parser.get(section, "Default", fallback="0") == "1"
         if path.is_dir():
-            found.append((name, path, default))
+            found.append(
+                {
+                    "name": name,
+                    "path": path,
+                    "resolved": resolved,
+                    "legacy_default": legacy_default,
+                    "install_default": resolved in install_defaults,
+                }
+            )
 
-    found.sort(key=lambda item: not item[2])
     return found
 
 
-def choose_profile(specified: str | None) -> Path:
+def choose_profile(specified: str | None, running: Path | None = None) -> Path:
     if specified:
         path = Path(os.path.expandvars(specified)).expanduser()
         if not path.is_dir():
             raise SystemExit(f"Error: profile directory does not exist: {path}")
         return path
 
-    profiles: list[tuple[str, Path, bool]] = []
+    profiles: list[dict[str, object]] = []
     seen: set[Path] = set()
     for ini in candidate_ini_files():
         print(f"Found profile list: {ini}")
-        for name, path, default in read_profiles(ini):
-            if path in seen:
+        for item in read_profiles(ini):
+            path = Path(item["path"])
+            resolved = Path(item["resolved"])
+            if resolved in seen:
                 continue
-            seen.add(path)
-            profiles.append((name, path, default))
+            seen.add(resolved)
+            profiles.append(item)
 
     if not profiles:
         raise SystemExit(
@@ -410,18 +480,63 @@ def choose_profile(specified: str | None) -> Path:
             "Specify it with: python3 install.py --profile /full/path/to/profile"
         )
 
-    if len(profiles) == 1:
-        return profiles[0][1]
+    running_resolved = None
+    if running:
+        try:
+            running_resolved = running.resolve()
+        except OSError:
+            running_resolved = running
 
+    def score(item: dict[str, object]) -> int:
+        if running_resolved is not None and Path(item["resolved"]) == running_resolved:
+            return 4
+        if item["install_default"]:
+            return 3
+        if item["legacy_default"]:
+            return 2
+        return 1
+
+    ranked = sorted(profiles, key=score, reverse=True)
+
+    if running_resolved is not None and all(
+        Path(item["resolved"]) != running_resolved for item in ranked
+    ):
+        ranked.insert(
+            0,
+            {
+                "name": running.name,
+                "path": running,
+                "resolved": running_resolved,
+                "legacy_default": False,
+                "install_default": False,
+                "_score": 4,
+            },
+        )
+
+    def rank(item: dict[str, object]) -> int:
+        return int(item.get("_score", score(item)))
+
+    ranked.sort(key=rank, reverse=True)
+    top_score = rank(ranked[0])
+    top = [item for item in ranked if rank(item) == top_score]
+    rest = [item for item in ranked if rank(item) != top_score]
+
+    if len(top) == 1:
+        selected = Path(top[0]["path"])
+        print(f"Selected profile: {selected}")
+        return selected
+
+    choices = top + rest
     print("\nMultiple Firefox profiles found:")
-    for index, (name, path, default) in enumerate(profiles, 1):
-        marker = " (default)" if default else ""
-        print(f"  {index}. {name}{marker} — {path}")
+    for index, item in enumerate(choices, 1):
+        value = rank(item)
+        marker = {4: " (running)", 3: " (default)", 2: " (legacy default)"}.get(value, "")
+        print(f"  {index}. {item['name']}{marker} — {item['path']}")
 
     while True:
         answer = input("Choose the profile number: ").strip()
-        if answer.isdigit() and 1 <= int(answer) <= len(profiles):
-            return profiles[int(answer) - 1][1]
+        if answer.isdigit() and 1 <= int(answer) <= len(choices):
+            return Path(choices[int(answer) - 1]["path"])
         print("Invalid choice.")
 
 
@@ -533,7 +648,8 @@ def main() -> None:
             "Use --force only if you know what you are doing."
         )
 
-    profile = choose_profile(args.profile)
+    running = active_profile() if args.force else None
+    profile = choose_profile(args.profile, running)
     targets = destinations(profile)
     stamp = time.strftime("%Y%m%d-%H%M%S")
 

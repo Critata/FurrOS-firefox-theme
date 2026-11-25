@@ -2,7 +2,7 @@
 Type=Application
 Name=Install FurrOS Firefox Theme
 Comment=Install the FurrOS theme in the default Firefox profile
-Exec=bash -c 'cd "%k" && ./install.sh; echo; read -rp "Press Enter to close..."'
+Exec=bash -c 'k="%k"; k="${k#file://}"; cd "$(dirname "$k")" && ./install.sh; echo; read -rp "Press Enter to close..."'
 Path=%k
 Terminal=true
 Icon=firefox
