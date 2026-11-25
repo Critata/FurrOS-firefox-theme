@@ -5,6 +5,8 @@ Works on Linux, Windows and macOS. Firefox must be closed because
 user.js and the chrome CSS files are read only at startup.
 """
 
+from __future__ import annotations
+
 import argparse
 import configparser
 import hashlib
@@ -18,32 +20,36 @@ from pathlib import Path
 
 SOURCE = Path(__file__).resolve().parent
 THEME_FILES = ("userChrome.css", "userContent.css", "user.js")
+REQUIRED_PREF = 'user_pref("toolkit.legacyUserProfileCustomizations.stylesheets", true);'
 
 
 def sha256(path: Path) -> str:
-    h = hashlib.sha256()
-    with path.open("rb") as f:
-        for chunk in iter(lambda: f.read(65536), b""):
-            h.update(chunk)
-    return h.hexdigest()
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(65536), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def firefox_running() -> bool:
     system = platform.system()
     try:
         if system == "Windows":
-            out = subprocess.check_output(
+            output = subprocess.check_output(
                 ["tasklist"], text=True, errors="ignore", timeout=10
             )
-            return "firefox.exe" in out.lower()
-        out = subprocess.check_output(
-            ["pgrep", "-af", "firefox"], text=True, errors="ignore", timeout=10
-        )
-        for line in out.splitlines():
-            low = line.lower()
-            if "install.py" in low or "pgrep" in low:
+            return "firefox.exe" in output.lower()
+
+        # Match process names only. Matching full command lines would also
+        # match this installer when its path contains "firefox".
+        for name in ("firefox", "firefox-bin", "org.mozilla.firefox"):
+            try:
+                output = subprocess.check_output(
+                    ["pgrep", "-x", name], text=True, errors="ignore", timeout=10
+                )
+            except subprocess.CalledProcessError:
                 continue
-            if "firefox" in low:
+            if output.strip():
                 return True
         return False
     except Exception:
@@ -52,35 +58,41 @@ def firefox_running() -> bool:
 
 def candidate_ini_files() -> list[Path]:
     home = Path.home()
-    candidates: list[Path] = []
+    raw: list[Path] = []
 
     if platform.system() == "Windows":
-        appdata = os.environ.get("APPDATA")
-        if appdata:
-            candidates.append(Path(appdata) / "Mozilla" / "Firefox" / "Profiles" / "profiles.ini")
+        for variable in ("APPDATA", "LOCALAPPDATA"):
+            value = os.environ.get(variable)
+            if value:
+                raw.append(
+                    Path(value) / "Mozilla" / "Firefox" / "Profiles" / "profiles.ini"
+                )
+        raw.append(home / "Mozilla" / "Firefox" / "Profiles" / "profiles.ini")
     elif platform.system() == "Darwin":
-        candidates.append(home / "Library" / "Application Support" / "Firefox" / "Profiles" / "profiles.ini")
+        raw.append(
+            home / "Library" / "Application Support" / "Firefox" / "Profiles" / "profiles.ini"
+        )
     else:
-        candidates += [
+        raw += [
             home / ".mozilla" / "firefox" / "profiles.ini",
             home / ".config" / "mozilla" / "firefox" / "profiles.ini",
             home / "snap" / "firefox" / "common" / ".mozilla" / "firefox" / "profiles.ini",
             home / ".var" / "app" / "org.mozilla.firefox" / ".mozilla" / "firefox" / "profiles.ini",
         ]
 
-    # Also try these everywhere, in case of unusual installs.
-    candidates += [
+    # Unusual installs may still use the generic Linux/macOS locations.
+    raw += [
         home / ".mozilla" / "firefox" / "profiles.ini",
         home / ".config" / "mozilla" / "firefox" / "profiles.ini",
     ]
 
     seen: set[Path] = set()
     result: list[Path] = []
-    for p in candidates:
-        p = p.expanduser()
-        if p.is_file() and p not in seen:
-            seen.add(p)
-            result.append(p)
+    for candidate in raw:
+        candidate = candidate.expanduser()
+        if candidate.is_file() and candidate not in seen:
+            seen.add(candidate)
+            result.append(candidate)
     return result
 
 
@@ -89,12 +101,14 @@ def read_profiles(ini: Path) -> list[tuple[str, Path, bool]]:
     parser.read(ini)
     base = ini.parent
     found: list[tuple[str, Path, bool]] = []
+
     for section in parser.sections():
         if not section.lower().startswith("profile"):
             continue
         raw = parser.get(section, "Path", fallback="").strip()
         if not raw:
             continue
+
         path = Path(os.path.expandvars(raw)).expanduser()
         if not path.is_absolute():
             path = base / path
@@ -102,16 +116,17 @@ def read_profiles(ini: Path) -> list[tuple[str, Path, bool]]:
         default = parser.get(section, "Default", fallback="0") == "1"
         if path.is_dir():
             found.append((name, path, default))
+
     found.sort(key=lambda item: not item[2])
     return found
 
 
 def choose_profile(specified: str | None) -> Path:
     if specified:
-        p = Path(os.path.expandvars(specified)).expanduser()
-        if not p.is_dir():
-            raise SystemExit(f"Error: profile directory does not exist: {p}")
-        return p
+        path = Path(os.path.expandvars(specified)).expanduser()
+        if not path.is_dir():
+            raise SystemExit(f"Error: profile directory does not exist: {path}")
+        return path
 
     profiles: list[tuple[str, Path, bool]] = []
     seen: set[Path] = set()
@@ -136,6 +151,7 @@ def choose_profile(specified: str | None) -> Path:
     for index, (name, path, default) in enumerate(profiles, 1):
         marker = " (default)" if default else ""
         print(f"  {index}. {name}{marker} — {path}")
+
     while True:
         answer = input("Choose the profile number: ").strip()
         if answer.isdigit() and 1 <= int(answer) <= len(profiles):
@@ -153,7 +169,45 @@ def destinations(profile: Path) -> dict[str, Path]:
     }
 
 
-def write_report(profile: Path, stamp: str | None, targets: dict[str, Path], removed: bool) -> Path:
+def verify_required_pref(user_js: Path) -> None:
+    with user_js.open("r", encoding="utf-8", errors="ignore") as handle:
+        content = handle.read()
+    if REQUIRED_PREF not in content:
+        raise SystemExit(
+            "Error: user.js is missing the required stylesheet preference."
+        )
+
+
+def get_firefox_version() -> str:
+    commands = [
+        ["firefox", "--version"],
+        ["firefox.exe", "--version"],
+    ]
+    if platform.system() == "Windows":
+        commands = [["firefox.exe", "--version"], ["firefox", "--version"]]
+    elif platform.system() == "Darwin":
+        commands.insert(
+            0,
+            [
+                "/Applications/Firefox.app/Contents/MacOS/firefox",
+                "--version",
+            ],
+        )
+
+    for command in commands:
+        try:
+            output = subprocess.check_output(
+                command, text=True, errors="ignore", timeout=10
+            )
+            return output.strip().splitlines()[0]
+        except Exception:
+            continue
+    return "version unavailable"
+
+
+def write_report(
+    profile: Path, stamp: str | None, targets: dict[str, Path], removed: bool
+) -> Path:
     report = Path.home() / "FurrOS-install-report.txt"
     lines = [
         "FurrOS Firefox theme installation report",
@@ -165,6 +219,7 @@ def write_report(profile: Path, stamp: str | None, targets: dict[str, Path], rem
         f"Profile:  {profile}",
         f"Firefox:  {get_firefox_version()}",
     ]
+
     if removed:
         lines.append("Action:   Uninstall")
         for target in targets.values():
@@ -176,31 +231,20 @@ def write_report(profile: Path, stamp: str | None, targets: dict[str, Path], rem
         ]
         for name, target in targets.items():
             lines.append(f"Verified: {name} -> {target}")
+        lines.append("Verified: stylesheet preference enabled")
+
     report.write_text("\n".join(lines) + "\n", encoding="utf-8")
     return report
 
 
-def get_firefox_version() -> str:
-    commands = [
-        ["firefox", "--version"],
-        ["firefox.exe", "--version"],
-    ]
-    if platform.system() == "Windows":
-        commands = [["firefox.exe", "--version"], ["firefox", "--version"]]
-    for cmd in commands:
-        try:
-            return subprocess.check_output(
-                cmd, text=True, errors="ignore", timeout=10
-            ).strip().splitlines()[0]
-        except Exception:
-            continue
-    return "version unavailable"
-
-
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Install the FurrOS Firefox theme on Linux, Windows or macOS.")
+    parser = argparse.ArgumentParser(
+        description="Install the FurrOS Firefox theme on Linux, Windows or macOS."
+    )
     parser.add_argument("--profile", help="Use this Firefox profile instead of detecting it")
-    parser.add_argument("--force", action="store_true", help="Install even if Firefox is running")
+    parser.add_argument(
+        "--force", action="store_true", help="Install even if Firefox is running"
+    )
     parser.add_argument("--uninstall", action="store_true", help="Remove the theme files")
     args = parser.parse_args()
 
@@ -230,22 +274,26 @@ def main() -> None:
         print("Start Firefox again to apply the change.")
         return
 
-    for name, target in targets.items():
+    for target in targets.values():
         if target.exists():
             shutil.copy2(target, target.with_name(f"{target.name}.bak-{stamp}"))
 
-    for name, target in targets.items():
+    for name in THEME_FILES:
         source = SOURCE / name
         if not source.is_file():
             raise SystemExit(f"Error: missing source file: {source}")
+        target = targets[name]
         shutil.copy2(source, target)
         if sha256(source) != sha256(target):
             raise SystemExit(f"Error: verification failed for {name}")
+
+    verify_required_pref(targets["user.js"])
 
     report = write_report(profile, stamp, targets, removed=False)
     print(f"\nFurrOS theme installed in: {profile}")
     print(f"Previous files backed up with suffix .bak-{stamp}")
     print("Verified: all three theme files match the repository.")
+    print("Verified: stylesheet preference enabled.")
     print(f"Report saved: {report}")
     print("\nNow start Firefox. If it was open, close it completely first.")
 

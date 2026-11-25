@@ -7,11 +7,11 @@ A Firefox theme inspired by [FurrOS](https://furros.xyz/): dark chrome, chips wi
 - `userChrome.css` — Firefox UI: oval address bar, attached dropdown, menus and panels.
 - `userContent.css` — internal pages: wordmark, embedded FurrOS wallpapers, AI chatbot styles.
 - `user.js` — required preferences (`toolkit.legacyUserProfileCustomizations.stylesheets`, dark theme, wallpapers, disabled shortcuts/stories/widgets).
-- `install.py` — cross-platform installer (Linux, Windows, macOS).
-- `install.sh` — Linux launcher.
-- `install.bat` — Windows launcher.
-- `install.command` — macOS launcher.
+- `install.sh` — Linux/macOS installer. No Python required.
+- `install.command` — macOS double-click launcher.
 - `install.desktop` — Linux desktop launcher.
+- `install.bat` + `install.ps1` — Windows launchers. PowerShell is built into Windows, so no Python required.
+- `install.py` — optional cross-platform alternative, only if you already have Python 3.
 - `diagnose.sh` — prints system/profile information if the install fails.
 
 ## Installation
@@ -21,41 +21,50 @@ Extract the archive first, then use the launcher for your system:
 | System | What to do |
 | --- | --- |
 | **Linux** | Open a terminal in the extracted folder and run `./install.sh`. You can also double-click `install.desktop`. |
-| **Windows** | Double-click `install.bat` (requires Python 3; check “Add Python to PATH” during installation). |
-| **macOS** | Double-click `install.command` (or run `./install.command` in a terminal). |
+| **macOS** | Double-click `install.command` (or run `./install.command` in a terminal). If macOS blocks it, right-click it and choose **Open**, or run `chmod +x install.command` first. |
+| **Windows** | Double-click `install.bat`. It uses the built-in PowerShell. |
 
-All launchers call the same cross-platform installer:
+Optional alternative, if Python 3 is available:
 
 ```bash
 python3 install.py
 ```
 
-**Close Firefox completely before running the installer.** The theme files are read only when Firefox starts. If Firefox is still running, the installer stops with an error. It writes a detailed report to `~/FurrOS-install-report.txt`.
+**Close Firefox completely before running the installer.** The theme files are read only when Firefox starts. If Firefox is still running, the installer stops with an error. It writes a detailed report to `FurrOS-install-report.txt` in your home folder.
 
 If you have multiple profiles or want to choose one manually:
 
 ```bash
-python3 install.py --profile /full/path/to/profile
+./install.sh --profile /full/path/to/profile
 ```
 
-Use `--force` only if you know what you are doing and want to install while Firefox is running:
+On Windows:
 
-```bash
-python3 install.py --force
+```powershell
+powershell -ExecutionPolicy Bypass -File install.ps1 -Profile "C:\Users\Name\AppData\Roaming\Mozilla\Firefox\Profiles\xxxx.default-release"
 ```
+
+Use `--force` (or `-Force` in PowerShell) only if you know what you are doing and want to install while Firefox is running.
 
 The installer:
 
-1. detects the default Firefox profile (Linux, Windows, macOS, Snap and Flatpak) or asks you to choose;
+1. detects the default Firefox profile (Linux, macOS, Windows, Snap and Flatpak) or asks you to choose;
 2. creates the `chrome` folder if needed;
 3. backs up the existing `userChrome.css`, `userContent.css` and `user.js` with a `.bak-DATE-TIME` suffix;
-4. copies the theme files and verifies them with SHA-256;
-5. asks you to start Firefox again.
+4. copies the theme files and verifies them byte-for-byte;
+5. verifies that `user.js` enables custom stylesheets;
+6. asks you to start Firefox again.
 
 ## Uninstall
 
 ```bash
-python3 install.py --uninstall
+./install.sh --uninstall
+```
+
+On Windows:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File install.ps1 -Uninstall
 ```
 
 Close Firefox first. This removes the three theme files. Your backups are kept in the profile.
@@ -73,9 +82,9 @@ If nothing changes after the install:
 
 1. Confirm Firefox was fully closed before running the installer.
 2. Run `./diagnose.sh` and check which profile list is detected.
-3. Open `~/FurrOS-install-report.txt`: it shows the exact profile and files installed.
+3. Open `FurrOS-install-report.txt` in your home folder: it shows the exact profile and files installed.
 4. Start Firefox again; the theme is applied only at startup.
-5. If the profile is unusual, run: `python3 install.py --profile /full/path/to/profile`.
+5. If the profile is unusual, run: `./install.sh --profile /full/path/to/profile`.
 
 ## Release
 
