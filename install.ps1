@@ -1,7 +1,8 @@
 param(
   [string]$Profile,
   [switch]$Force,
-  [switch]$Uninstall
+  [switch]$Uninstall,
+  [switch]$SkipFirefoxInstall
 )
 
 $ErrorActionPreference = 'Stop'
@@ -16,6 +17,86 @@ Write-Host 'FurrOS Firefox theme installer - starting...'
 function Get-Sha256 {
   param([string]$Path)
   return (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant()
+}
+
+function Test-FirefoxInstalled {
+  foreach ($name in @('firefox', 'firefox.exe')) {
+    if (Get-Command $name -ErrorAction SilentlyContinue) { return $true }
+  }
+
+  $paths = @(
+    (Join-Path $env:ProgramFiles 'Mozilla Firefox\firefox.exe'),
+    (Join-Path ${env:ProgramFiles(x86)} 'Mozilla Firefox\firefox.exe'),
+    (Join-Path $env:LOCALAPPDATA 'Mozilla Firefox\firefox.exe')
+  )
+  foreach ($path in $paths) {
+    if ($path -and (Test-Path -LiteralPath $path -PathType Leaf)) { return $true }
+  }
+
+  $roots = @(
+    'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*',
+    'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*',
+    'HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*'
+  )
+  foreach ($root in $roots) {
+    $entries = Get-ItemProperty -Path $root -ErrorAction SilentlyContinue
+    if ($entries | Where-Object { $_.DisplayName -like '*Firefox*' }) { return $true }
+  }
+
+  return $false
+}
+
+function Install-Firefox {
+  if (Get-Command winget -ErrorAction SilentlyContinue) {
+    winget install --id Mozilla.Firefox -e --accept-source-agreements --accept-package-agreements --silent
+    return
+  }
+  if (Get-Command choco -ErrorAction SilentlyContinue) {
+    choco install firefox -y
+    return
+  }
+  if (Get-Command scoop -ErrorAction SilentlyContinue) {
+    scoop install firefox
+    return
+  }
+
+  $url = 'https://download.mozilla.org/?product=firefox-latest-ssl&os=win64&lang=en-US'
+  $out = Join-Path $env:TEMP 'FirefoxSetup.exe'
+  Write-Host 'Downloading Firefox for Windows...'
+  Invoke-WebRequest -Uri $url -OutFile $out -UseBasicParsing
+  Start-Process -FilePath $out -ArgumentList '/S' -Wait
+}
+
+function Ensure-Firefox {
+  param([bool]$Skip)
+
+  if (Test-FirefoxInstalled) { return }
+
+  if ($Skip) {
+    throw "Error: Firefox is not installed.`nInstall it manually, or run the installer without -SkipFirefoxInstall."
+  }
+
+  Write-Host 'Firefox not found. Installing it automatically...'
+  try {
+    Install-Firefox
+  } catch {
+    throw "Error: could not install Firefox automatically. $($_.Exception.Message)"
+  }
+
+  $machinePath = [Environment]::GetEnvironmentVariable('Path', 'Machine')
+  $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
+  if ($machinePath -and $userPath) {
+    $env:Path = "$machinePath;$userPath"
+  } elseif ($machinePath) {
+    $env:Path = $machinePath
+  } elseif ($userPath) {
+    $env:Path = $userPath
+  }
+
+  if (-not (Test-FirefoxInstalled)) {
+    throw 'Error: Firefox was installed but could not be detected. Start Firefox once, then run this installer again.'
+  }
+  Write-Host 'Firefox installed successfully.'
 }
 
 function Test-FirefoxRunning {
@@ -185,6 +266,10 @@ try {
     if (-not (Test-Path -LiteralPath $sourceFile -PathType Leaf)) {
       throw "Error: missing source file: $sourceFile"
     }
+  }
+
+  if (-not $Uninstall) {
+    Ensure-Firefox -Skip $SkipFirefoxInstall
   }
 
   if (-not $Force -and (Test-FirefoxRunning)) {

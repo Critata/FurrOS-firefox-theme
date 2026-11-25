@@ -30,6 +30,8 @@ Optional alternative, if Python 3 is available:
 python3 install.py
 ```
 
+**If Firefox is not installed, the installer installs it automatically.** On Linux it uses the available package manager (APT, DNF, Pacman, Zypper, APK, Flatpak or Snap); on macOS it downloads the official Firefox DMG; on Windows it uses Winget, Chocolatey, Scoop or the official Mozilla installer. This may ask for your administrator password. To disable this behaviour, pass `--skip-firefox-install` (or `-SkipFirefoxInstall` in PowerShell).
+
 **Close Firefox completely before running the installer.** The theme files are read only when Firefox starts. If Firefox is still running, the installer stops with an error. It writes a detailed report to `FurrOS-install-report.txt` in your home folder.
 
 If you have multiple profiles or want to choose one manually:
@@ -48,12 +50,13 @@ Use `--force` (or `-Force` in PowerShell) only if you know what you are doing an
 
 The installer:
 
-1. detects the default Firefox profile (Linux, macOS, Windows, Snap and Flatpak) or asks you to choose;
-2. creates the `chrome` folder if needed;
-3. backs up the existing `userChrome.css`, `userContent.css` and `user.js` with a `.bak-DATE-TIME` suffix;
-4. copies the theme files and verifies them byte-for-byte;
-5. verifies that `user.js` enables custom stylesheets;
-6. asks you to start Firefox again.
+1. installs Firefox if it is missing;
+2. detects the default Firefox profile (Linux, macOS, Windows, Snap and Flatpak) or asks you to choose;
+3. creates the `chrome` folder if needed;
+4. backs up the existing `userChrome.css`, `userContent.css` and `user.js` with a `.bak-DATE-TIME` suffix;
+5. copies the theme files and verifies them byte-for-byte;
+6. verifies that `user.js` enables custom stylesheets;
+7. asks you to start Firefox again.
 
 ## Uninstall
 

@@ -15,7 +15,9 @@ import platform
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
+import urllib.request
 from pathlib import Path
 
 SOURCE = Path(__file__).resolve().parent
@@ -54,6 +56,186 @@ def firefox_running() -> bool:
         return False
     except Exception:
         return False
+
+
+def firefox_installed() -> bool:
+    if shutil.which("firefox") or shutil.which("firefox-esr"):
+        return True
+
+    system = platform.system()
+    if system == "Darwin":
+        return Path("/Applications/Firefox.app/Contents/MacOS/firefox").is_file()
+
+    if system == "Windows":
+        roots = (
+            os.environ.get("ProgramFiles", r"C:\Program Files"),
+            os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)"),
+            os.environ.get("LOCALAPPDATA", str(Path.home() / "AppData" / "Local")),
+        )
+        for root in roots:
+            if (Path(root) / "Mozilla" / "Firefox" / "firefox.exe").is_file():
+                return True
+        return False
+
+    for candidate in (
+        "/usr/bin/firefox",
+        "/usr/local/bin/firefox",
+        "/usr/lib/firefox/firefox",
+        "/opt/firefox/firefox",
+        "/snap/bin/firefox",
+        str(Path.home() / ".local" / "bin" / "firefox"),
+    ):
+        if Path(candidate).exists():
+            return True
+
+    try:
+        if shutil.which("flatpak"):
+            output = subprocess.check_output(
+                ["flatpak", "list", "--app"],
+                text=True,
+                errors="ignore",
+                timeout=15,
+            )
+            if "org.mozilla.firefox" in output:
+                return True
+        if shutil.which("snap"):
+            output = subprocess.check_output(
+                ["snap", "list", "firefox"],
+                text=True,
+                errors="ignore",
+                timeout=15,
+            )
+            if output.strip():
+                return True
+    except Exception:
+        pass
+
+    return False
+
+
+def run_as_root(command: list[str]) -> None:
+    if hasattr(os, "geteuid") and os.geteuid() != 0:
+        command = ["sudo"] + command
+    subprocess.run(command, check=True)
+
+
+def install_firefox_linux() -> None:
+    managers = (
+        ("apt-get", (("apt-get", "update"), ("apt-get", "install", "-y", "firefox"))),
+        ("dnf", (("dnf", "install", "-y", "firefox"),)),
+        ("yum", (("yum", "install", "-y", "firefox"),)),
+        ("zypper", (("zypper", "--non-interactive", "install", "firefox"),)),
+        ("pacman", (("pacman", "-S", "--noconfirm", "firefox"),)),
+        ("apk", (("apk", "add", "firefox"),)),
+        ("xbps-install", (("xbps-install", "-Sy", "firefox"),)),
+    )
+    for name, commands in managers:
+        if shutil.which(name):
+            for command in commands:
+                run_as_root(list(command))
+            return
+
+    if shutil.which("flatpak"):
+        subprocess.run(
+            ["flatpak", "install", "-y", "flathub", "org.mozilla.firefox"], check=True
+        )
+        return
+    if shutil.which("snap"):
+        run_as_root(["snap", "install", "firefox"])
+        return
+
+    raise RuntimeError("no supported package manager found")
+
+
+def install_firefox_macos() -> None:
+    url = "https://download.mozilla.org/?product=firefox-latest-ssl&os=osx&lang=en-US"
+    temp = Path(tempfile.mkdtemp(prefix="furros-firefox-"))
+    dmg = temp / "firefox.dmg"
+    mount = temp / "mount"
+    mount.mkdir()
+    print("Downloading Firefox for macOS...")
+
+    urllib.request.urlretrieve(url, dmg)
+    subprocess.run(
+        ["hdiutil", "attach", str(dmg), "-mountpoint", str(mount), "-nobrowse", "-quiet"],
+        check=True,
+    )
+    try:
+        app = Path("/Applications/Firefox.app")
+        if app.exists():
+            shutil.rmtree(app)
+        try:
+            shutil.copytree(mount / "Firefox.app", app)
+        except PermissionError:
+            subprocess.run(
+                ["sudo", "cp", "-R", str(mount / "Firefox.app"), "/Applications/"],
+                check=True,
+            )
+    finally:
+        subprocess.run(["hdiutil", "detach", str(mount), "-quiet"], check=False)
+        shutil.rmtree(temp, ignore_errors=True)
+
+
+def install_firefox_windows() -> None:
+    if shutil.which("winget"):
+        subprocess.run(
+            [
+                "winget",
+                "install",
+                "--id",
+                "Mozilla.Firefox",
+                "-e",
+                "--accept-source-agreements",
+                "--accept-package-agreements",
+                "--silent",
+            ],
+            check=True,
+        )
+        return
+    if shutil.which("choco"):
+        subprocess.run(["choco", "install", "firefox", "-y"], check=True)
+        return
+    if shutil.which("scoop"):
+        subprocess.run(["scoop", "install", "firefox"], check=True)
+        return
+
+    url = "https://download.mozilla.org/?product=firefox-latest-ssl&os=win64&lang=en-US"
+    temp_dir = Path(os.environ.get("TEMP", str(Path.home() / "AppData" / "Local" / "Temp")))
+    installer = temp_dir / "FirefoxSetup.exe"
+    print("Downloading Firefox for Windows...")
+    urllib.request.urlretrieve(url, installer)
+    subprocess.run([str(installer), "/S"], check=True)
+
+
+def ensure_firefox(skip: bool) -> None:
+    if firefox_installed():
+        return
+    if skip:
+        raise SystemExit(
+            "Error: Firefox is not installed.\n"
+            "Install it manually, or run the installer without --skip-firefox-install."
+        )
+
+    print("Firefox not found. Installing it automatically...")
+    try:
+        if platform.system() == "Windows":
+            install_firefox_windows()
+        elif platform.system() == "Darwin":
+            install_firefox_macos()
+        else:
+            install_firefox_linux()
+    except Exception as exc:
+        raise SystemExit(
+            f"Error: could not install Firefox automatically. {exc}\n"
+            "Install Firefox manually, then run this installer again."
+        )
+
+    if not firefox_installed():
+        raise SystemExit(
+            "Error: Firefox was installed but could not be detected.\n"
+            "Start Firefox once, then run this installer again."
+        )
+    print("Firefox installed successfully.")
 
 
 def candidate_ini_files() -> list[Path]:
@@ -246,9 +428,17 @@ def main() -> None:
         "--force", action="store_true", help="Install even if Firefox is running"
     )
     parser.add_argument("--uninstall", action="store_true", help="Remove the theme files")
+    parser.add_argument(
+        "--skip-firefox-install",
+        action="store_true",
+        help="Do not install Firefox automatically if missing",
+    )
     args = parser.parse_args()
 
     print("FurrOS Firefox theme installer — starting...")
+
+    if not args.uninstall:
+        ensure_firefox(args.skip_firefox_install)
 
     if not args.force and firefox_running():
         raise SystemExit(

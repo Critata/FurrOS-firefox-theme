@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # POSIX-style installer for Linux and macOS.
+# Installs Firefox automatically if it is missing.
 # No Python required: Firefox profiles are detected directly from profiles.ini.
 
 set -euo pipefail
@@ -8,6 +9,7 @@ SRC="$(cd "$(dirname "$0")" && pwd -P)"
 PROFILE=""
 FORCE=0
 UNINSTALL=0
+SKIP_FIREFOX_INSTALL=0
 REPORT="$HOME/FurrOS-install-report.txt"
 REQUIRED_PREF='user_pref("toolkit.legacyUserProfileCustomizations.stylesheets", true);'
 
@@ -16,13 +18,14 @@ usage() {
 Usage: ./install.sh [options]
 
 Options:
-  --profile PATH   Use this Firefox profile instead of detecting it
-  --force          Install even if Firefox is running (not recommended)
-  --uninstall      Remove the theme files (backups are kept)
-  -h, --help       Show this message
+  --profile PATH          Use this Firefox profile instead of detecting it
+  --force                 Install even if Firefox is running (not recommended)
+  --uninstall             Remove the theme files (backups are kept)
+  --skip-firefox-install  Do not install Firefox automatically if missing
+  -h, --help              Show this message
 
-Important: close Firefox completely before running this script.
-The theme files are loaded only when Firefox starts.
+Firefox is installed automatically when missing. Close Firefox completely
+before installing the theme: the theme files are read only at startup.
 EOF
 }
 
@@ -39,6 +42,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --uninstall)
       UNINSTALL=1
+      shift
+      ;;
+    --skip-firefox-install)
+      SKIP_FIREFOX_INSTALL=1
       shift
       ;;
     -h|--help)
@@ -66,6 +73,148 @@ firefox_running() {
   done
   return 1
 }
+
+firefox_installed() {
+  if [[ -n "${FURR_FIREFOX_BIN:-}" ]]; then
+    [[ -x "$FURR_FIREFOX_BIN" ]] && return 0
+    return 1
+  fi
+
+  if command -v firefox >/dev/null 2>&1 || command -v firefox-esr >/dev/null 2>&1; then
+    return 0
+  fi
+
+  for candidate in \
+    /usr/bin/firefox \
+    /usr/local/bin/firefox \
+    /usr/lib/firefox/firefox \
+    /opt/firefox/firefox \
+    /snap/bin/firefox \
+    "$HOME/.local/bin/firefox"; do
+    [[ -x "$candidate" ]] && return 0
+  done
+
+  if [[ "$(uname -s)" == "Darwin" && -x "/Applications/Firefox.app/Contents/MacOS/firefox" ]]; then
+    return 0
+  fi
+
+  if command -v flatpak >/dev/null 2>&1 \
+    && flatpak list --app 2>/dev/null | grep -q 'org.mozilla.firefox'; then
+    return 0
+  fi
+
+  if command -v snap >/dev/null 2>&1 && snap list firefox >/dev/null 2>&1; then
+    return 0
+  fi
+
+  return 1
+}
+
+run_as_root() {
+  if [[ "$(id -u)" -eq 0 ]]; then
+    "$@"
+  else
+    sudo "$@"
+  fi
+}
+
+install_firefox_linux() {
+  if command -v apt-get >/dev/null 2>&1; then
+    run_as_root apt-get update
+    run_as_root apt-get install -y firefox
+  elif command -v dnf >/dev/null 2>&1; then
+    run_as_root dnf install -y firefox
+  elif command -v yum >/dev/null 2>&1; then
+    run_as_root yum install -y firefox
+  elif command -v zypper >/dev/null 2>&1; then
+    run_as_root zypper --non-interactive install firefox
+  elif command -v pacman >/dev/null 2>&1; then
+    run_as_root pacman -S --noconfirm firefox
+  elif command -v apk >/dev/null 2>&1; then
+    run_as_root apk add firefox
+  elif command -v xbps-install >/dev/null 2>&1; then
+    run_as_root xbps-install -Sy firefox
+  elif command -v flatpak >/dev/null 2>&1; then
+    flatpak install -y flathub org.mozilla.firefox
+  elif command -v snap >/dev/null 2>&1; then
+    run_as_root snap install firefox
+  else
+    return 1
+  fi
+}
+
+install_firefox_macos() {
+  command -v curl >/dev/null 2>&1 || return 1
+  command -v hdiutil >/dev/null 2>&1 || return 1
+
+  local tmp mount
+  tmp="$(mktemp -d)"
+  mount="$tmp/mount"
+  mkdir -p "$mount"
+
+  echo "Downloading Firefox for macOS..."
+  curl -fL --retry 3 \
+    -o "$tmp/firefox.dmg" \
+    'https://download.mozilla.org/?product=firefox-latest-ssl&os=osx&lang=en-US'
+
+  hdiutil attach "$tmp/firefox.dmg" -mountpoint "$mount" -nobrowse -quiet
+  if [[ -w /Applications ]]; then
+    rm -rf /Applications/Firefox.app
+    cp -R "$mount/Firefox.app" /Applications/Firefox.app
+  else
+    sudo rm -rf /Applications/Firefox.app
+    sudo cp -R "$mount/Firefox.app" /Applications/Firefox.app
+  fi
+  hdiutil detach "$mount" -quiet
+  rm -rf "$tmp"
+}
+
+ensure_firefox() {
+  if firefox_installed; then
+    return 0
+  fi
+
+  if [[ "$SKIP_FIREFOX_INSTALL" -eq 1 ]]; then
+    echo "Error: Firefox is not installed." >&2
+    echo "Install it manually, or run the installer without --skip-firefox-install." >&2
+    exit 1
+  fi
+
+  echo "Firefox not found. Installing it automatically..."
+  case "$(uname -s)" in
+    Linux)
+      install_firefox_linux || {
+        echo "Error: could not install Firefox automatically." >&2
+        echo "Install Firefox manually, then run this installer again." >&2
+        exit 1
+      }
+      ;;
+    Darwin)
+      install_firefox_macos || {
+        echo "Error: could not install Firefox automatically." >&2
+        echo "Install Firefox manually, then run this installer again." >&2
+        exit 1
+      }
+      ;;
+    *)
+      echo "Error: automatic Firefox installation is not supported on this system." >&2
+      exit 1
+      ;;
+  esac
+
+  # The override is only for detecting a missing browser before installation.
+  unset FURR_FIREFOX_BIN
+  if ! firefox_installed; then
+    echo "Error: Firefox was installed but could not be detected." >&2
+    echo "Start Firefox once, then run this installer again." >&2
+    exit 1
+  fi
+  echo "Firefox installed successfully."
+}
+
+if [[ "$UNINSTALL" -ne 1 ]]; then
+  ensure_firefox
+fi
 
 if [[ "$FORCE" -ne 1 ]] && firefox_running; then
   echo "Error: Firefox is still running." >&2
@@ -242,6 +391,9 @@ TS="$(date +%Y%m%d-%H%M%S)"
 
 version() {
   firefox --version 2>/dev/null \
+    || firefox-esr --version 2>/dev/null \
+    || flatpak run org.mozilla.firefox --version 2>/dev/null \
+    || snap run firefox --version 2>/dev/null \
     || /Applications/Firefox.app/Contents/MacOS/firefox --version 2>/dev/null \
     || echo "version unavailable"
 }
