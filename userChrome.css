@@ -1,0 +1,800 @@
+/* ==========================================================================
+   FurrOS theme for Firefox  ·  https://furros.xyz/
+   Palette, bordi e ombre "sticker" presi dal design system del sito.
+   Disattivabile mettendo a false:
+   toolkit.legacyUserProfileCustomizations.stylesheets
+   ========================================================================== */
+
+:root {
+  /* Firefox 161 usa i token light-dark(): senza questo i pannelli restano
+     chiari (testo scuro su sfondo chiaro) anche con il tema FurrOS. */
+  color-scheme: dark !important;
+
+  --furr-night: #150b11;
+  --furr-plum: #1e1218;
+  --furr-surface: #2a1a22;
+  --furr-surface-2: #3a2430;
+  --furr-ink: #0e080b;
+  --furr-paper: #ffecec;
+  --furr-text: #ffecec;
+  --furr-dim: #c8aab4;
+  --furr-cyan: #7ff0f0;
+  --furr-pink: #ff8cbe;
+  --furr-red: #e23a44;
+  --furr-maroon: #781c2c;
+  --furr-green: #78e6a0;
+  --furr-yellow: #ffbe5a;
+
+  --furr-outline: 2.5px;
+  --furr-radius: 12px;
+  --furr-shadow: 3px 3px 0;
+  --furr-font: "Nunito", "Segoe UI", system-ui, sans-serif;
+  --furr-mono: "JetBrains Mono", ui-monospace, "Cascadia Mono", monospace;
+
+  /* Variabili native di Firefox: fanno gran parte del lavoro */
+  --lwt-accent-color: var(--furr-night) !important;
+  --lwt-text-color: var(--furr-text) !important;
+  --toolbar-bgcolor: var(--furr-plum) !important;
+  --toolbar-color: var(--furr-text) !important;
+  --toolbarbutton-icon-fill: var(--furr-text) !important;
+  --toolbarbutton-icon-fill-attention: var(--furr-cyan) !important;
+  --toolbar-field-background-color: var(--furr-night) !important;
+  --toolbar-field-color: var(--furr-text) !important;
+  --toolbar-field-border-color: var(--furr-paper) !important;
+  --toolbar-field-focus-background-color: var(--furr-surface) !important;
+  --toolbar-field-focus-color: var(--furr-text) !important;
+  --toolbar-field-focus-border-color: var(--furr-cyan) !important;
+  --tab-selected-bgcolor: var(--furr-paper) !important;
+  --tab-selected-textcolor: var(--furr-ink) !important;
+  --tab-hover-background-color: var(--furr-surface) !important;
+  --tab-border-radius: 12px !important;
+  --tab-loading-fill: var(--furr-cyan) !important;
+  --arrowpanel-background: var(--furr-surface) !important;
+  --arrowpanel-color: var(--furr-text) !important;
+  --arrowpanel-border-color: var(--furr-paper) !important;
+  --arrowpanel-border-radius: 16px !important;
+  --panel-background-color: var(--furr-surface) !important;
+  --panel-text-color: var(--furr-text) !important;
+  --panel-border-color: var(--furr-paper) !important;
+  --panel-border-radius: 16px !important;
+  --panel-separator-color: var(--furr-surface-2) !important;
+  --panel-banner-item-color: var(--furr-text) !important;
+  --panel-banner-item-background-color: var(--furr-surface-2) !important;
+  --panel-banner-item-hover-bgcolor: var(--furr-maroon) !important;
+  --panel-banner-item-active-bgcolor: var(--furr-cyan) !important;
+  --promo-background-color-vibrant: var(--furr-surface-2) !important;
+  --promo-message-text-color-vibrant: var(--furr-text) !important;
+  --promo-border-color-vibrant: var(--furr-paper) !important;
+  --button-bgcolor: var(--furr-surface-2) !important;
+  --button-hover-bgcolor: var(--furr-maroon) !important;
+  --button-active-bgcolor: var(--furr-cyan) !important;
+  --button-color: var(--furr-text) !important;
+  --focus-outline-color: var(--furr-cyan) !important;
+  --urlbar-box-bgcolor: var(--furr-surface-2) !important;
+  --urlbar-box-text-color: var(--furr-text) !important;
+  --urlbarView-highlight-background: var(--furr-cyan) !important;
+  --urlbarView-highlight-color: var(--furr-ink) !important;
+  --urlbarView-hover-background: var(--furr-surface-2) !important;
+  --urlbarView-separator-color: var(--furr-surface-2) !important;
+  --newtab-background-color: var(--furr-night) !important;
+  --sidebar-background-color: var(--furr-night) !important;
+  --sidebar-text-color: var(--furr-text) !important;
+
+  scrollbar-color: var(--furr-surface-2) var(--furr-night);
+}
+
+/* --------------------------------------------------------------------------
+   Finestra, barre e font
+   -------------------------------------------------------------------------- */
+#main-window,
+#browser,
+#appcontent,
+#tabbrowser-tabpanels {
+  background: var(--furr-night) !important;
+}
+
+#navigator-toolbox {
+  background: var(--furr-plum) !important;
+  border-bottom: 2px solid var(--furr-ink) !important;
+}
+
+#TabsToolbar,
+#nav-bar,
+#PersonalToolbar,
+#sidebar-box,
+#sidebar-header,
+#sidebar-main,
+menupopup,
+panel,
+#statuspanel-label,
+#findbar,
+.tab-label,
+#urlbar-input,
+#searchbar,
+toolbarbutton {
+  font-family: var(--furr-font) !important;
+}
+
+#TabsToolbar {
+  background: transparent !important;
+  padding: 5px 6px 0 !important;
+}
+
+/* --------------------------------------------------------------------------
+   Schede: chip con bordo ink e ombra sticker
+   -------------------------------------------------------------------------- */
+#tabbrowser-tabs {
+  --tab-min-height: 38px !important;
+  --tab-block-margin: 3px !important;
+}
+
+.tabbrowser-tab {
+  padding-inline: 2px !important;
+}
+
+.tab-background {
+  border: var(--furr-outline) solid transparent !important;
+  border-radius: var(--furr-radius) !important;
+  background: transparent !important;
+  background-image: none !important;
+  box-shadow: none !important;
+  transition: background-color .18s ease, border-color .18s ease, box-shadow .18s ease !important;
+}
+
+.tabbrowser-tab:hover > .tab-stack > .tab-background:not([selected]) {
+  background: var(--furr-surface) !important;
+  border-color: var(--furr-surface-2) !important;
+}
+
+.tabbrowser-tab[selected] > .tab-stack > .tab-background {
+  background: var(--furr-paper) !important;
+  border-color: var(--furr-ink) !important;
+  box-shadow: var(--furr-shadow) var(--furr-pink) !important;
+}
+
+.tabbrowser-tab[multiselected] > .tab-stack > .tab-background {
+  background: var(--furr-surface-2) !important;
+  border-color: var(--furr-cyan) !important;
+  box-shadow: var(--furr-shadow) var(--furr-cyan) !important;
+}
+
+.tab-label {
+  color: var(--furr-dim) !important;
+  font-weight: 800 !important;
+}
+
+.tabbrowser-tab:hover:not([selected]) .tab-label {
+  color: var(--furr-text) !important;
+}
+
+.tabbrowser-tab[selected] .tab-label {
+  color: var(--furr-ink) !important;
+  font-weight: 900 !important;
+}
+
+.tab-icon-image {
+  border-radius: 4px !important;
+}
+
+.tab-close-button {
+  border-radius: 7px !important;
+  color: var(--furr-dim) !important;
+  fill: currentColor !important;
+}
+
+.tabbrowser-tab[selected] .tab-close-button {
+  color: var(--furr-ink) !important;
+}
+
+.tab-close-button:hover {
+  background: var(--furr-red) !important;
+  color: var(--furr-paper) !important;
+}
+
+/* Nuova scheda + pulsanti della striscia */
+#tabs-newtab-button,
+#new-tab-button,
+#alltabs-button,
+#scrollbutton-up,
+#scrollbutton-down {
+  border-radius: 10px !important;
+}
+
+#tabs-newtab-button:hover,
+#new-tab-button:hover,
+#alltabs-button:hover,
+#scrollbutton-up:hover,
+#scrollbutton-down:hover {
+  background: var(--furr-surface-2) !important;
+}
+
+/* --------------------------------------------------------------------------
+   Barra degli indirizzi
+   -------------------------------------------------------------------------- */
+#nav-bar {
+  background: var(--furr-plum) !important;
+  border-top: 2px solid var(--furr-ink) !important;
+  padding: 6px 8px !important;
+  box-shadow: none !important;
+}
+
+#urlbar-container {
+  padding-inline: 6px !important;
+}
+
+/* Firefox 161+: la barra indirizzi è un custom element con shadow DOM.
+   Si personalizza tramite le sue variabili CSS. */
+#urlbar {
+  /* Il bordo esterno resta, ma niente outline interno sull'input:
+     altrimenti compaiono due linee verticali ciano quando si clicca. */
+  --urlbar-input-container-outline-open: none !important;
+  --urlbar-input-container-outline-open-focused: none !important;
+  --urlbar-background-outline-focused: none !important;
+  --urlbar-background-color: var(--furr-night) !important;
+  --urlbar-background-color-focus: var(--furr-surface) !important;
+  --urlbar-background-border: var(--furr-outline) solid var(--furr-paper) !important;
+  --urlbar-background-border-focused: var(--furr-outline) solid var(--furr-cyan) !important;
+  --urlbar-background-border-open: var(--furr-outline) solid var(--furr-cyan) !important;
+  --urlbar-background-border-radius: calc(var(--urlbar-height) / 2) !important;
+  --urlbarview-border-radius: calc(var(--urlbar-height) / 2) !important;
+  --urlbar-border-radius: calc(var(--urlbar-height) / 2) !important;
+  /* Niente sfondo "allargato": la barra resta il piccolo ovale e la tendina
+     è allineata alla stessa larghezza, con un piccolo spazio per l'ombra. */
+  --urlbar-background-overhang-open: 0px !important;
+  --urlbar-joint-background-overlap: 0px !important;
+  --urlbarview-joint-background-outset-inline: 0px !important;
+  --urlbarview-joint-background-outset-block: 0px !important;
+  --urlbarview-margin-block: 0px !important;
+  --urlbarview-margin-inline: 0px !important;
+  --urlbar-background-box-shadow-open: 5px 5px 0 var(--furr-pink) !important;
+  --toolbar-field-text-color: var(--furr-text) !important;
+  --toolbar-field-text-color-focus: var(--furr-text) !important;
+  --toolbar-field-border-color: var(--furr-paper) !important;
+  --toolbar-field-border-color-focus: var(--furr-cyan) !important;
+  --urlbar-box-background-color: var(--furr-surface-2) !important;
+  --urlbar-box-background-color-hover: var(--furr-maroon) !important;
+  --urlbar-box-background-color-focus: var(--furr-surface-2) !important;
+  --urlbar-box-text-color: var(--furr-text) !important;
+  --urlbarview-background-color-hover: var(--furr-surface-2) !important;
+  --urlbarview-background-color-selected: var(--furr-cyan) !important;
+  --urlbarview-text-color-hover: var(--furr-text) !important;
+  --urlbarview-text-color-selected: var(--furr-ink) !important;
+  --urlbarview-text-color-secondary: var(--furr-dim) !important;
+  --urlbarview-text-color-action: var(--furr-pink) !important;
+  --urlbarview-separator-color: var(--furr-surface-2) !important;
+
+  border-radius: calc(var(--urlbar-height) / 2) !important;
+  box-shadow: none !important;
+}
+
+#urlbar-background,
+#searchbar {
+  background: var(--furr-night) !important;
+  border: var(--furr-outline) solid var(--furr-paper) !important;
+  border-radius: var(--furr-radius) !important;
+  box-shadow: var(--furr-shadow) var(--furr-red) !important;
+  transition: background-color .18s ease, border-color .18s ease, box-shadow .18s ease !important;
+}
+
+#urlbar-background {
+  border-radius: var(--urlbar-background-border-radius) !important;
+  box-shadow: none !important;
+}
+
+/* Unione continua: la tendina si attacca al piccolo ovale con un solo
+   contorno, disegnato come un'unica pill barra + risultati. */
+#urlbar[focused] .urlbar-background {
+  border-radius: calc(var(--urlbar-height) / 2) !important;
+}
+
+#urlbar .urlbarView {
+  margin-block: 0px !important;
+  margin-inline: 0px !important;
+}
+
+#urlbar:hover > #urlbar-background {
+  border-color: var(--furr-pink) !important;
+}
+
+#urlbar[focused] > #urlbar-background,
+#urlbar[open] > #urlbar-background {
+  background: var(--furr-surface) !important;
+  border-color: var(--furr-cyan) !important;
+  box-shadow: none !important;
+}
+
+#searchbar input,
+.findbar-textbox {
+  outline: none !important;
+  box-shadow: none !important;
+}
+
+/* Nessun rettangolo interno: il focus è solo il bordo ovale della barra. */
+#urlbar-input,
+#urlbar-input:focus,
+#urlbar-input:-moz-focusring {
+  outline: none !important;
+  box-shadow: none !important;
+}
+
+#urlbar-input {
+  color: var(--furr-text) !important;
+  font-weight: 700 !important;
+}
+
+#urlbar-input::placeholder {
+  color: var(--furr-dim) !important;
+  opacity: .85 !important;
+}
+
+#urlbar-input-container {
+  padding-inline: 6px !important;
+}
+
+#identity-box,
+#tracking-protection-icon-container,
+#page-action-buttons > toolbarbutton,
+#star-button-box {
+  border-radius: 8px !important;
+}
+
+#identity-box:hover,
+#tracking-protection-icon-container:hover,
+#page-action-buttons > toolbarbutton:hover,
+#star-button-box:hover {
+  background: var(--furr-surface-2) !important;
+}
+
+#urlbar-search-mode-indicator {
+  background: var(--furr-cyan) !important;
+  color: var(--furr-ink) !important;
+  border-radius: 8px !important;
+  font-weight: 900 !important;
+}
+
+/* Risultati del megabar */
+#urlbar-results {
+  background: var(--furr-surface) !important;
+  border-radius: var(--furr-radius) !important;
+  padding: 4px !important;
+}
+
+.urlbarView-row-inner {
+  border-radius: 10px !important;
+  padding: 5px 8px !important;
+}
+
+.urlbarView-row:hover .urlbarView-row-inner {
+  background: var(--furr-surface-2) !important;
+}
+
+.urlbarView-row[selected] .urlbarView-row-inner {
+  background: var(--furr-cyan) !important;
+  color: var(--furr-ink) !important;
+}
+
+.urlbarView-row[selected] .urlbarView-title,
+.urlbarView-row[selected] .urlbarView-url,
+.urlbarView-row[selected] .urlbarView-action,
+.urlbarView-row[selected] .urlbarView-title-separator {
+  color: var(--furr-ink) !important;
+}
+
+.urlbarView-title {
+  font-weight: 800 !important;
+}
+
+.urlbarView-url {
+  color: var(--furr-cyan) !important;
+  font-family: var(--furr-mono) !important;
+  font-size: 12px !important;
+}
+
+.urlbarView-row[selected] .urlbarView-url {
+  color: var(--furr-ink) !important;
+}
+
+.urlbarView-button {
+  border-radius: 8px !important;
+}
+
+.urlbarView-button:hover {
+  background: var(--furr-pink) !important;
+  color: var(--furr-ink) !important;
+}
+
+/* --------------------------------------------------------------------------
+   Pulsanti delle barre
+   -------------------------------------------------------------------------- */
+#nav-bar toolbarbutton,
+#PersonalToolbar toolbarbutton,
+#TabsToolbar toolbarbutton {
+  border-radius: 10px !important;
+}
+
+#nav-bar toolbarbutton:hover:not([disabled]),
+#PersonalToolbar toolbarbutton:hover:not([disabled]) {
+  background: var(--furr-surface-2) !important;
+}
+
+#nav-bar toolbarbutton:active,
+#nav-bar toolbarbutton[open],
+#PersonalToolbar toolbarbutton:active,
+#PersonalToolbar toolbarbutton[open] {
+  background: var(--furr-maroon) !important;
+}
+
+.toolbarbutton-badge {
+  background: var(--furr-red) !important;
+  color: var(--furr-paper) !important;
+  border-radius: 999px !important;
+  font-weight: 900 !important;
+}
+
+/* --------------------------------------------------------------------------
+   Barra dei segnalibri
+   -------------------------------------------------------------------------- */
+#PersonalToolbar {
+  background: var(--furr-plum) !important;
+  border-top: 2px solid var(--furr-ink) !important;
+  padding: 4px 8px 6px !important;
+}
+
+#personal-bookmarks .bookmark-item {
+  border-radius: 8px !important;
+  padding: 4px 8px !important;
+  color: var(--furr-text) !important;
+  font-weight: 800 !important;
+}
+
+#personal-bookmarks .bookmark-item:hover {
+  background: var(--furr-surface-2) !important;
+}
+
+#personal-bookmarks .bookmark-item[container] {
+  color: var(--furr-dim) !important;
+}
+
+/* --------------------------------------------------------------------------
+   Menu contestuali e pannelli
+   -------------------------------------------------------------------------- */
+/* Firefox 161 mette `color-scheme: light dark` direttamente sul popup:
+   i token light-dark() resterebbero chiari anche con :root scuro. */
+menupopup,
+panel,
+#contentAreaContextMenu,
+#chatbot-menupopup {
+  color-scheme: dark !important;
+  appearance: none !important;
+  background: var(--furr-surface) !important;
+  color: var(--furr-text) !important;
+  border: var(--furr-outline) solid var(--furr-paper) !important;
+  border-radius: 14px !important;
+  padding: 6px !important;
+  --panel-background-color: var(--furr-surface) !important;
+  --panel-text-color: var(--furr-text) !important;
+  --panel-border-color: var(--furr-paper) !important;
+  --panel-separator-color: var(--furr-surface-2) !important;
+  --text-color: var(--furr-text) !important;
+  --text-color-disabled: var(--furr-dim) !important;
+  --text-color-deemphasized: var(--furr-dim) !important;
+  --button-text-color-menu: var(--furr-text) !important;
+}
+
+menupopup :is(menuitem, menu, menucaption) > :is(.menu-text, .menu-accel, .menu-iconic-icon) {
+  color: var(--furr-text) !important;
+  fill: currentColor !important;
+}
+
+menupopup :is(menuitem, menu)[_moz-menuactive="true"] > :is(.menu-text, .menu-accel, .menu-iconic-icon) {
+  color: var(--furr-ink) !important;
+  fill: var(--furr-ink) !important;
+}
+
+menupopup :is(menuitem, menu)[disabled] {
+  color: var(--furr-dim) !important;
+  opacity: .7 !important;
+}
+
+menupopup menuseparator::before {
+  border-color: var(--furr-surface-2) !important;
+}
+
+menupopup::part(content) {
+  background: var(--furr-surface) !important;
+  color: var(--furr-text) !important;
+  border: var(--furr-outline) solid var(--furr-paper) !important;
+  border-radius: 14px !important;
+}
+
+menuitem,
+menu {
+  border-radius: 8px !important;
+  color: var(--furr-text) !important;
+  padding-block: 4px !important;
+  padding-inline: 8px !important;
+}
+
+menuitem[_moz-menuactive="true"],
+menu[_moz-menuactive="true"] {
+  background: var(--furr-cyan) !important;
+  color: var(--furr-ink) !important;
+}
+
+menuitem[_moz-menuactive="true"] .menu-text,
+menuitem[_moz-menuactive="true"] .menu-accel,
+menu[_moz-menuactive="true"] .menu-text,
+menu[_moz-menuactive="true"] .menu-accel {
+  color: var(--furr-ink) !important;
+}
+
+menuitem[_moz-menuactive="true"] .menu-iconic-icon,
+menu[_moz-menuactive="true"] .menu-iconic-icon {
+  fill: var(--furr-ink) !important;
+}
+
+menuseparator {
+  border-top: 2px solid var(--furr-surface-2) !important;
+  margin: 5px 8px !important;
+  padding-block: 0 !important;
+}
+
+panel::part(content),
+.panel-arrowcontent {
+  background: var(--furr-surface) !important;
+  color: var(--furr-text) !important;
+  border: var(--furr-outline) solid var(--furr-paper) !important;
+  border-radius: 16px !important;
+  box-shadow: 4px 4px 0 var(--furr-red) !important;
+}
+
+.panel-arrow {
+  fill: var(--furr-paper) !important;
+}
+
+.panel-subview-body {
+  padding: 6px !important;
+}
+
+.subviewbutton {
+  border-radius: 10px !important;
+  color: var(--furr-text) !important;
+}
+
+.subviewbutton:hover:not([disabled]),
+.subviewbutton:focus-visible:not([disabled]) {
+  background: var(--furr-cyan) !important;
+  color: var(--furr-ink) !important;
+}
+
+.subviewbutton:hover:not([disabled]) .toolbarbutton-text,
+.subviewbutton:hover:not([disabled]) .toolbarbutton-icon,
+.subviewbutton:hover:not([disabled]) label {
+  color: var(--furr-ink) !important;
+  fill: var(--furr-ink) !important;
+}
+
+.panel-header {
+  background: var(--furr-plum) !important;
+  color: var(--furr-text) !important;
+  border-bottom: 2px solid var(--furr-ink) !important;
+}
+
+/* Campi e liste dentro i pannelli: niente più bianco */
+panel input,
+panel textarea,
+panel-list,
+panel .more-actions-notice,
+.tab-note-preview-container,
+#tab-group-name,
+#tab-note-text,
+#searchmode-switcher-panel-list-urlbar {
+  background: var(--furr-night) !important;
+  color: var(--furr-text) !important;
+  border: var(--furr-outline) solid var(--furr-paper) !important;
+  border-radius: 8px !important;
+}
+
+panel input::placeholder,
+panel textarea::placeholder {
+  color: var(--furr-dim) !important;
+}
+
+/* Menu hamburger (appMenu-popup in Firefox 161) */
+#appMenu-popup {
+  color: var(--furr-text) !important;
+
+  /* I token qui sotto vengono impostati di nuovo da Firefox con !important
+     solo se Nova è attivo: li riscriviamo sul pannello stesso. */
+  --panel-banner-item-color: var(--furr-text) !important;
+  --panel-banner-item-background-color: var(--furr-surface-2) !important;
+  --panel-banner-item-hover-bgcolor: var(--furr-maroon) !important;
+  --panel-banner-item-active-bgcolor: var(--furr-cyan) !important;
+  --promo-background-color-vibrant: var(--furr-surface-2) !important;
+  --promo-message-text-color-vibrant: var(--furr-text) !important;
+  --promo-border-color-vibrant: var(--furr-paper) !important;
+}
+
+#appMenu-fxa-sign-in-promo-link {
+  color: var(--furr-cyan) !important;
+}
+
+#appMenu-fxa-signed-out-message {
+  color: var(--furr-pink) !important;
+}
+
+#appMenu-popup .panel-subview-body {
+  padding: 6px !important;
+}
+
+#appMenu-popup .subviewbutton {
+  min-height: 34px !important;
+}
+
+/* Notifiche / popup download */
+#downloadsPanel-multiView,
+#downloadsListBox {
+  background: var(--furr-surface) !important;
+  color: var(--furr-text) !important;
+}
+
+.downloadTarget {
+  color: var(--furr-text) !important;
+}
+
+#downloadsPanel .downloadDetails {
+  color: var(--furr-dim) !important;
+}
+
+/* --------------------------------------------------------------------------
+   Barra di stato, trova, sidebar
+   -------------------------------------------------------------------------- */
+#statuspanel-label {
+  background: var(--furr-ink) !important;
+  color: var(--furr-cyan) !important;
+  border: 2px solid var(--furr-cyan) !important;
+  border-radius: 8px !important;
+  box-shadow: var(--furr-shadow) var(--furr-pink) !important;
+  font-family: var(--furr-mono) !important;
+  font-weight: 700 !important;
+  padding: 3px 8px !important;
+}
+
+findbar {
+  background: var(--furr-surface) !important;
+  color: var(--furr-text) !important;
+  border-top: var(--furr-outline) solid var(--furr-paper) !important;
+}
+
+.findbar-textbox {
+  background: var(--furr-night) !important;
+  color: var(--furr-text) !important;
+  border: 2px solid var(--furr-paper) !important;
+  border-radius: 8px !important;
+  font-family: var(--furr-font) !important;
+}
+
+.findbar-textbox:focus {
+  border-color: var(--furr-cyan) !important;
+  outline: none !important;
+}
+
+#sidebar-box {
+  background: var(--furr-plum) !important;
+  color: var(--furr-text) !important;
+  border-inline-end: 2px solid var(--furr-ink) !important;
+}
+
+#sidebar-header {
+  background: var(--furr-plum) !important;
+  color: var(--furr-text) !important;
+  border-bottom: 2px solid var(--furr-ink) !important;
+  font-weight: 900 !important;
+}
+
+#sidebar {
+  background: var(--furr-night) !important;
+}
+
+#sidebar-main {
+  background: var(--furr-plum) !important;
+  border-inline-end: 2px solid var(--furr-ink) !important;
+}
+
+#sidebar-main toolbarbutton:hover {
+  background: var(--furr-surface-2) !important;
+}
+
+/* Pulsanti di controllo finestra (se disegnati da Firefox) */
+.titlebar-button {
+  border-radius: 8px !important;
+  color: var(--furr-text) !important;
+  fill: var(--furr-text) !important;
+}
+
+.titlebar-button > .toolbarbutton-icon {
+  fill: var(--furr-text) !important;
+  color: var(--furr-text) !important;
+}
+
+.titlebar-button:hover {
+  background: var(--furr-surface-2) !important;
+}
+
+.titlebar-close:hover {
+  background: var(--furr-red) !important;
+  color: var(--furr-paper) !important;
+}
+
+/* Selezione e focus */
+::selection {
+  background: var(--furr-pink) !important;
+  color: var(--furr-ink) !important;
+}
+
+#navigator-toolbox :-moz-focusring:not(input):not(textarea) {
+  outline: 2px solid var(--furr-cyan) !important;
+  outline-offset: -2px !important;
+}
+
+/* --------------------------------------------------------------------------
+   Unione liscia barra URL / tendina: un solo bordo ciano e una sola ombra,
+   dalla cima dell'ovale fino in fondo ai risultati. L'ovale non cambia:
+   quando la tendina è aperta il suo bordo viene solo nascosto e viene
+   disegnato il contorno continuo dalla tendina stessa.
+   -------------------------------------------------------------------------- */
+#urlbar[open] > .urlbar-background {
+  border-color: transparent !important;
+  background-image: none !important;
+  box-shadow: none !important;
+  border-radius: calc(var(--urlbar-height) / 2) calc(var(--urlbar-height) / 2) 0 0 !important;
+}
+
+#urlbar[open] .urlbarView {
+  background: var(--furr-surface) !important;
+  overflow: visible !important;
+}
+
+#urlbar[open] .urlbarView-background {
+  border: 0 !important;
+  box-shadow: none !important;
+  inset-block-start: 0px !important;
+}
+
+#urlbar[open] .urlbarView::before {
+  content: "" !important;
+  position: absolute !important;
+  top: calc(-1 * var(--urlbar-height)) !important;
+  left: 0 !important;
+  right: 0 !important;
+  bottom: 0 !important;
+  border: var(--furr-outline) solid var(--furr-cyan) !important;
+  border-radius: calc(var(--urlbar-height) / 2) !important;
+  box-shadow: var(--furr-shadow) var(--furr-pink) !important;
+  pointer-events: none !important;
+  z-index: 3 !important;
+}
+
+#urlbar[open] .urlbarView-results {
+  border-radius: 0 0 calc(var(--urlbar-height) / 2) calc(var(--urlbar-height) / 2) !important;
+  overflow: hidden !important;
+}
+
+#urlbar[open] .urlbarView > * {
+  position: relative !important;
+  z-index: 1 !important;
+}
+
+/* Divisoria a forma di piccola ovale tra ciò che scrivi e i risultati. */
+#urlbar[open] .urlbarView::after {
+  content: "" !important;
+  position: absolute !important;
+  top: 0 !important;
+  left: 8px !important;
+  right: 8px !important;
+  height: 3px !important;
+  background: var(--furr-cyan) !important;
+  border-radius: 999px !important;
+  z-index: 4 !important;
+  pointer-events: none !important;
+}
