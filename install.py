@@ -58,13 +58,30 @@ def firefox_running() -> bool:
         return False
 
 
-def firefox_installed() -> bool:
-    if shutil.which("firefox") or shutil.which("firefox-esr"):
-        return True
+def command_works(command: list[str]) -> bool:
+    try:
+        result = subprocess.run(
+            command + ["--version"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=15,
+        )
+        return result.returncode == 0
+    except Exception:
+        return False
+
+
+def firefox_ready() -> bool:
+    for name in ("firefox", "firefox-esr"):
+        binary = shutil.which(name)
+        if binary and command_works([binary]):
+            return True
 
     system = platform.system()
     if system == "Darwin":
-        return Path("/Applications/Firefox.app/Contents/MacOS/firefox").is_file()
+        binary = "/Applications/Firefox.app/Contents/MacOS/firefox"
+        if Path(binary).is_file() and command_works([binary]):
+            return True
 
     if system == "Windows":
         roots = (
@@ -73,7 +90,8 @@ def firefox_installed() -> bool:
             os.environ.get("LOCALAPPDATA", str(Path.home() / "AppData" / "Local")),
         )
         for root in roots:
-            if (Path(root) / "Mozilla" / "Firefox" / "firefox.exe").is_file():
+            binary = Path(root) / "Mozilla" / "Firefox" / "firefox.exe"
+            if binary.is_file() and command_works([str(binary)]):
                 return True
         return False
 
@@ -85,32 +103,28 @@ def firefox_installed() -> bool:
         "/snap/bin/firefox",
         str(Path.home() / ".local" / "bin" / "firefox"),
     ):
-        if Path(candidate).exists():
+        path = Path(candidate)
+        if path.exists() and command_works([str(path)]):
             return True
 
     try:
-        if shutil.which("flatpak"):
-            output = subprocess.check_output(
-                ["flatpak", "list", "--app"],
-                text=True,
-                errors="ignore",
-                timeout=15,
-            )
-            if "org.mozilla.firefox" in output:
-                return True
-        if shutil.which("snap"):
-            output = subprocess.check_output(
-                ["snap", "list", "firefox"],
-                text=True,
-                errors="ignore",
-                timeout=15,
-            )
-            if output.strip():
-                return True
+        if shutil.which("flatpak") and command_works(
+            ["flatpak", "run", "org.mozilla.firefox"]
+        ):
+            return True
+        if shutil.which("snap") and command_works(["snap", "run", "firefox"]):
+            return True
     except Exception:
         pass
 
     return False
+
+
+def firefox_installed() -> bool:
+    override = os.environ.get("FURR_FIREFOX_BIN")
+    if override:
+        return Path(override).is_file() and os.access(override, os.X_OK)
+    return firefox_ready()
 
 
 def run_as_root(command: list[str]) -> None:
@@ -133,18 +147,37 @@ def install_firefox_linux() -> None:
         if shutil.which(name):
             for command in commands:
                 run_as_root(list(command))
+            break
+
+    if firefox_ready():
+        return
+
+    # Ubuntu/Zorin install a small transitional "firefox" package that points
+    # to Snap. If that happened, install the real browser from Snap/Flatpak.
+    print("Firefox package installed, but the browser is not usable yet. Trying Snap/Flatpak...")
+    if not shutil.which("snap") and shutil.which("apt-get"):
+        try:
+            run_as_root(["apt-get", "install", "-y", "snapd"])
+        except Exception:
+            pass
+    fallbacks = (
+        (["flatpak", "install", "-y", "flathub", "org.mozilla.firefox"], False),
+        (["snap", "install", "firefox"], True),
+    )
+    for command, needs_root in fallbacks:
+        if not shutil.which(command[0]):
+            continue
+        try:
+            if needs_root:
+                run_as_root(command)
+            else:
+                subprocess.run(command, check=True)
+        except Exception:
+            pass
+        if firefox_ready():
             return
 
-    if shutil.which("flatpak"):
-        subprocess.run(
-            ["flatpak", "install", "-y", "flathub", "org.mozilla.firefox"], check=True
-        )
-        return
-    if shutil.which("snap"):
-        run_as_root(["snap", "install", "firefox"])
-        return
-
-    raise RuntimeError("no supported package manager found")
+    raise RuntimeError("Firefox package did not provide a usable browser")
 
 
 def install_firefox_macos() -> None:
@@ -229,6 +262,9 @@ def ensure_firefox(skip: bool) -> None:
             f"Error: could not install Firefox automatically. {exc}\n"
             "Install Firefox manually, then run this installer again."
         )
+
+    # The override is only for detecting a missing browser before installation.
+    os.environ.pop("FURR_FIREFOX_BIN", None)
 
     if not firefox_installed():
         raise SystemExit(

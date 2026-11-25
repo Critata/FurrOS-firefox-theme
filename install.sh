@@ -74,13 +74,11 @@ firefox_running() {
   return 1
 }
 
-firefox_installed() {
-  if [[ -n "${FURR_FIREFOX_BIN:-}" ]]; then
-    [[ -x "$FURR_FIREFOX_BIN" ]] && return 0
-    return 1
+firefox_ready() {
+  if command -v firefox >/dev/null 2>&1 && firefox --version >/dev/null 2>&1; then
+    return 0
   fi
-
-  if command -v firefox >/dev/null 2>&1 || command -v firefox-esr >/dev/null 2>&1; then
+  if command -v firefox-esr >/dev/null 2>&1 && firefox-esr --version >/dev/null 2>&1; then
     return 0
   fi
 
@@ -91,23 +89,39 @@ firefox_installed() {
     /opt/firefox/firefox \
     /snap/bin/firefox \
     "$HOME/.local/bin/firefox"; do
-    [[ -x "$candidate" ]] && return 0
+    if [[ -x "$candidate" ]] && "$candidate" --version >/dev/null 2>&1; then
+      return 0
+    fi
   done
 
-  if [[ "$(uname -s)" == "Darwin" && -x "/Applications/Firefox.app/Contents/MacOS/firefox" ]]; then
-    return 0
+  if [[ "$(uname -s)" == "Darwin" \
+    && -x "/Applications/Firefox.app/Contents/MacOS/firefox" ]]; then
+    if /Applications/Firefox.app/Contents/MacOS/firefox --version >/dev/null 2>&1; then
+      return 0
+    fi
   fi
 
   if command -v flatpak >/dev/null 2>&1 \
-    && flatpak list --app 2>/dev/null | grep -q 'org.mozilla.firefox'; then
+    && [[ "$(flatpak list --app 2>/dev/null)" == *org.mozilla.firefox* ]] \
+    && flatpak run org.mozilla.firefox --version >/dev/null 2>&1; then
     return 0
   fi
 
-  if command -v snap >/dev/null 2>&1 && snap list firefox >/dev/null 2>&1; then
+  if command -v snap >/dev/null 2>&1 \
+    && snap list firefox >/dev/null 2>&1 \
+    && snap run firefox --version >/dev/null 2>&1; then
     return 0
   fi
 
   return 1
+}
+
+firefox_installed() {
+  if [[ -n "${FURR_FIREFOX_BIN:-}" ]]; then
+    [[ -x "$FURR_FIREFOX_BIN" ]] && return 0
+    return 1
+  fi
+  firefox_ready
 }
 
 run_as_root() {
@@ -141,6 +155,31 @@ install_firefox_linux() {
   else
     return 1
   fi
+
+  if firefox_ready; then
+    return 0
+  fi
+
+  # Ubuntu/Zorin install a small transitional "firefox" package that points
+  # to Snap. If that happened, install the real browser from Snap/Flatpak.
+  echo "Firefox package installed, but the browser is not usable yet. Trying Snap/Flatpak..."
+  if command -v flatpak >/dev/null 2>&1; then
+    flatpak install -y flathub org.mozilla.firefox || true
+    if firefox_ready; then
+      return 0
+    fi
+  fi
+  if ! command -v snap >/dev/null 2>&1 && command -v apt-get >/dev/null 2>&1; then
+    run_as_root apt-get install -y snapd || true
+  fi
+  if command -v snap >/dev/null 2>&1; then
+    run_as_root snap install firefox || true
+    if firefox_ready; then
+      return 0
+    fi
+  fi
+
+  return 1
 }
 
 install_firefox_macos() {

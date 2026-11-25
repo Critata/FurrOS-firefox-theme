@@ -30,7 +30,7 @@ Optional alternative, if Python 3 is available:
 python3 install.py
 ```
 
-**If Firefox is not installed, the installer installs it automatically.** On Linux it uses the available package manager (APT, DNF, Pacman, Zypper, APK, Flatpak or Snap); on macOS it downloads the official Firefox DMG; on Windows it uses Winget, Chocolatey, Scoop or the official Mozilla installer. This may ask for your administrator password. To disable this behaviour, pass `--skip-firefox-install` (or `-SkipFirefoxInstall` in PowerShell).
+**If Firefox is not installed, the installer installs it automatically.** On Linux it uses the available package manager (APT, DNF, Pacman, Zypper, APK, Flatpak or Snap); on macOS it downloads the official Firefox DMG; on Windows it uses Winget, Chocolatey, Scoop or the official Mozilla installer. On Ubuntu/Zorin, where the APT package can be a small transitional package that only points to Snap, the installer detects that Firefox is not usable and installs the real browser from Snap/Flatpak automatically. This may ask for your administrator password. To disable this behaviour, pass `--skip-firefox-install` (or `-SkipFirefoxInstall` in PowerShell).
 
 **Close Firefox completely before running the installer.** The theme files are read only when Firefox starts. If Firefox is still running, the installer stops with an error. It writes a detailed report to `FurrOS-install-report.txt` in your home folder.
 
