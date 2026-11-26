@@ -17,6 +17,7 @@ while [[ -L "$SELF" ]]; do
 done
 SRC="$(cd "$(dirname "$SELF")" && pwd -P)"
 PROFILE=""
+MANUAL_PROFILE=0
 FORCE=0
 UNINSTALL=0
 SKIP_FIREFOX_INSTALL=0
@@ -65,6 +66,7 @@ while [[ $# -gt 0 ]]; do
     --profile)
       [[ $# -ge 2 ]] || { echo "Error: --profile requires a path." >&2; exit 1; }
       PROFILE="$2"
+      MANUAL_PROFILE=1
       shift 2
       ;;
     --firefox-bin)
@@ -246,6 +248,119 @@ managed_profiles_in_ini() {
   done < <(ini_profile_paths "$1")
 }
 
+# Which Firefox installation owns a profile path. Reported so a Flatpak or
+# Snap install can never be mistaken for a system Firefox install (and vice
+# versa): Flatpak is sandboxed and cannot read ~/.config/mozilla/firefox.
+profile_container() {
+  case "$1" in
+    */.var/app/org.mozilla.firefox/*) printf 'Flatpak' ;;
+    */snap/firefox/*) printf 'Snap' ;;
+    */Library/Application\ Support/Firefox/*) printf 'macOS' ;;
+    *Mozilla.Firefox*) printf 'Store/MSIX' ;;
+    *) printf 'system' ;;
+  esac
+}
+
+firefox_binary() {
+  if [[ -n "${FURR_FIREFOX_BIN:-}" ]]; then
+    printf '%s\n' "$FURR_FIREFOX_BIN"
+    return
+  fi
+  case "$(profile_container "${PROFILE:-}")" in
+    Flatpak) printf 'flatpak run org.mozilla.firefox\n' ;;
+    Snap) printf 'snap run firefox\n' ;;
+    *) command -v firefox || command -v firefox-esr || printf 'unknown\n' ;;
+  esac
+}
+
+# Capture the profile held open by the Firefox instance that was running when
+# the installer started. Must run BEFORE Firefox is closed. Only paths that
+# are also registered in an ini file are used for scoring, so an unrelated
+# lock from another user can never redirect the installation.
+ACTIVE_PROFILES=()
+
+is_active_profile() {
+  local active
+  for active in "${ACTIVE_PROFILES[@]-}"; do
+    [[ "$active" == "$1" ]] && return 0
+  done
+  return 1
+}
+
+capture_active_profiles() {
+  local pids pid link target rest name prefix candidate resolved active
+  [[ -d /proc ]] || return 0
+  pids="$(firefox_pids)" || return 0
+  [[ -n "$pids" ]] || return 0
+  read -ra pids <<< "$pids"
+  for pid in "${pids[@]}"; do
+    for link in /proc/"$pid"/fd/*; do
+      [[ -L "$link" ]] || continue
+      target="$(readlink "$link" 2>/dev/null)" || continue
+      case "$target" in
+        */mozilla/firefox/*)
+          rest="${target#*/mozilla/firefox/}"
+          name="${rest%%/*}"
+          prefix="${target%%/mozilla/firefox/*}"
+          candidate="$prefix/mozilla/firefox/$name"
+          ;;
+        */Mozilla/Firefox/Profiles/*)
+          rest="${target#*/Mozilla/Firefox/Profiles/}"
+          name="${rest%%/*}"
+          prefix="${target%%/Mozilla/Firefox/Profiles/*}"
+          candidate="$prefix/Mozilla/Firefox/Profiles/$name"
+          ;;
+        *) continue ;;
+      esac
+      [[ -d "$candidate" ]] || continue
+      [[ "$candidate" != */.cache/* ]] || continue
+      is_active_profile "$candidate" && continue
+      resolved="$(cd "$candidate" 2>/dev/null && pwd -P)" || continue
+      is_active_profile "$resolved" && continue
+      ACTIVE_PROFILES+=("$resolved")
+    done
+  done
+  if [[ ${#ACTIVE_PROFILES[@]} -gt 0 ]]; then
+    echo "Running Firefox profile: ${ACTIVE_PROFILES[0]} ($(profile_container "${ACTIVE_PROFILES[0]}"))"
+  fi
+}
+
+# A SIGKILL or a crash can leave lock files behind. If no Firefox process is
+# alive, a lock pointing at a dead PID (or an empty .parentlock) is stale and
+# must be removed: otherwise Firefox refuses to start and the theme appears
+# not to be applied even though every file was copied correctly.
+clear_stale_profile_locks() {
+  [[ -z "$(firefox_pids)" ]] || return 0
+  local ini path name file target pid
+  while IFS= read -r ini; do
+    [[ -f "$ini" ]] || continue
+    while IFS= read -r path; do
+      # WSL cannot inspect Windows processes with pgrep; never touch locks
+      # inside the Windows filesystem from the Linux side.
+      [[ "$WSL" -eq 1 && "$path" == /mnt/* ]] && continue
+      for name in lock parent.lock .parentlock; do
+        file="$path/$name"
+        [[ -e "$file" || -L "$file" ]] || continue
+        if [[ -L "$file" ]]; then
+          target="$(readlink "$file" 2>/dev/null)" || continue
+        elif [[ -r "$file" ]]; then
+          target="$(head -c 128 "$file" 2>/dev/null)" || continue
+        else
+          continue
+        fi
+        pid=""
+        [[ "$target" =~ :\+?([0-9]+)$ ]] && pid="${BASH_REMATCH[1]}"
+        if [[ -n "$pid" ]] && process_alive "$pid"; then
+          continue
+        fi
+        echo "Removing stale profile lock: $file"
+        rm -f "$file"
+      done
+    done < <(ini_profile_paths "$ini")
+  done < <(profile_ini_candidates)
+  return 0
+}
+
 wait_for_profile_locks() {
   local profile="$1" seconds="${2:-$LOCK_TIMEOUT}" i=0 locks="" found
   while :; do
@@ -352,6 +467,7 @@ handle_running_firefox() {
     echo "Close it manually and run the installer again." >&2
     return 1
   fi
+  clear_stale_profile_locks || return 1
   wait_for_all_profile_locks || return 1
   echo "Firefox closed; profile locks released."
   return 0
@@ -739,8 +855,11 @@ if [[ "$UNINSTALL" -ne 1 ]]; then
   ensure_firefox
 fi
 
-# Close Firefox before any profile/ini file is read, created or modified.
+# Capture the active profile before shutdown, then close Firefox and clear
+# locks left behind by an earlier crash before touching any profile data.
+capture_active_profiles
 handle_running_firefox || exit 1
+clear_stale_profile_locks
 
 if [[ "$UNINSTALL" -ne 1 ]]; then
   create_firefox_profile
@@ -874,10 +993,12 @@ if [[ -z "$PROFILE" ]]; then
     exit 1
   fi
 
-  # Firefox is already closed at this point, so selection is based only on
-  # the ini files. Score: 3 = Firefox [Install] default, 2 = legacy
-  # [Profile] Default=1, 1 = other profile. Ties are resolved automatically:
-  # FurrOS-managed profile, then initialized, then default-release, then the
+  # Score: 5 = profile that was open when installation started (this is what
+  # distinguishes Flatpak from a system Firefox install), 3 = Firefox
+  # [Install] default, 2 = legacy [Profile] Default=1, 1 = other profile.
+  # The active profile was recorded before Firefox was closed and is only
+  # considered when it is registered in an ini file. Ties are resolved
+  # automatically: FurrOS-managed, initialized, default-release, then the
   # lexicographically first path. Never prompt.
   SCORED=()
   for entry in "${PROFILES[@]}"; do
@@ -890,6 +1011,11 @@ if [[ -z "$PROFILE" ]]; then
     for default_path in "${INSTALL_DEFAULTS[@]}"; do
       [[ "$default_path" == "$path" ]] && score=3
     done
+    # The running profile wins even when another installation's [Install]
+    # section sorts first (a common Flatpak + system Firefox setup).
+    if is_active_profile "$path"; then
+      score=5
+    fi
 
     managed=0
     [[ -f "$path/$MANAGED_MARKER" ]] && managed=1
@@ -922,6 +1048,14 @@ if [[ ! -d "$PROFILE" ]]; then
 fi
 
 CHROME="$PROFILE/chrome"
+
+if [[ "$MANUAL_PROFILE" -eq 1 ]]; then
+  PROFILE_SOURCE="manual --profile"
+elif is_active_profile "$PROFILE"; then
+  PROFILE_SOURCE="running Firefox ($(profile_container "$PROFILE"))"
+else
+  PROFILE_SOURCE="Firefox profile lists"
+fi
 
 # Final guard immediately before any write: a profile can be locked by a
 # Firefox instance that started while the installer was running.
@@ -969,7 +1103,10 @@ if [[ "$UNINSTALL" -eq 1 ]]; then
     echo "Home:     $HOME"
     echo "Source:   $SRC"
     echo "Profile:  $PROFILE"
+    echo "Profile source: ${PROFILE_SOURCE:-automatic}"
+    echo "Container:     $(profile_container "$PROFILE")"
     echo "Firefox:  $(version)"
+    echo "Firefox binary: $(firefox_binary)"
     echo "Action:   Uninstall"
     if [[ ${#REMOVED[@]} -eq 0 ]]; then
       echo "Removed:  nothing (no theme files were present)"
@@ -1019,7 +1156,10 @@ grep -Fq "$REQUIRED_PREF" "$PROFILE/user.js" || {
   echo "Home:     $HOME"
   echo "Source:   $SRC"
   echo "Profile:  $PROFILE"
+  echo "Profile source: ${PROFILE_SOURCE:-automatic}"
+  echo "Container:     $(profile_container "$PROFILE")"
   echo "Firefox:  $(version)"
+  echo "Firefox binary: $(firefox_binary)"
   echo "Backup:   .bak-$TS"
   echo "Action:   Install"
   echo "Verified: $CHROME/userChrome.css"

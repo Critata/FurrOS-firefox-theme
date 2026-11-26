@@ -31,6 +31,7 @@ MANAGED_MARKER = ".furros-profile"
 FIREFOX_CLOSE_TIMEOUT = 15
 FIREFOX_KILL_TIMEOUT = 5
 LOCK_TIMEOUT = 15
+ACTIVE_PROFILES: set[Path] = set()
 # Match names and full command lines; the latter catches Flatpak, Snap and
 # custom binaries without matching this installer's own path.
 FIREFOX_CMD_PATTERN = re.compile(
@@ -265,6 +266,52 @@ def wait_for_all_profile_locks() -> None:
             wait_for_profile_locks(profile)
 
 
+def any_firefox_running() -> bool:
+    """Check the right process list for the current platform."""
+    if platform.system() == "Windows":
+        return bool(windows_firefox_pids())
+    if is_wsl():
+        try:
+            output = subprocess.check_output(
+                ["tasklist.exe"], text=True, errors="ignore", timeout=10
+            )
+            return "firefox.exe" in output.lower()
+        except Exception:
+            return False
+    return bool(firefox_pids())
+
+
+def clear_stale_profile_locks() -> None:
+    """Drop lock files whose owning Firefox process is no longer alive."""
+    if any_firefox_running():
+        return
+    for ini in candidate_ini_files():
+        for profile in ini_profile_paths(ini):
+            for name in ("lock", "parent.lock", ".parentlock"):
+                lock = profile / name
+                if not (lock.exists() or lock.is_symlink()):
+                    continue
+                if lock.is_symlink():
+                    try:
+                        target = os.readlink(lock)
+                    except OSError:
+                        continue
+                else:
+                    try:
+                        target = lock.read_text(encoding="utf-8", errors="ignore")[:128]
+                    except OSError:
+                        continue
+                match = re.search(r":\+?(\d+)$", target)
+                pid = int(match.group(1)) if match else None
+                if pid is not None and process_alive(pid):
+                    continue
+                print(f"Removing stale profile lock: {lock}")
+                try:
+                    lock.unlink()
+                except OSError:
+                    pass
+
+
 def terminate_processes(pids: list[int], sig: int) -> None:
     for pid in pids:
         try:
@@ -396,6 +443,7 @@ def handle_running_firefox(force: bool) -> None:
             + ", ".join(str(pid) for pid in left)
             + ").\nClose it manually and run the installer again."
         )
+    clear_stale_profile_locks()
     wait_for_all_profile_locks()
     print("Firefox closed; profile locks released.")
 
@@ -883,36 +931,76 @@ def candidate_ini_files() -> list[Path]:
     return result
 
 
-def active_profile() -> Path | None:
-    """Find the profile a running Firefox instance is using (Linux only)."""
+def profile_container(path: Path) -> str:
+    """Identify the Firefox installation that owns a profile path."""
+    text = str(path)
+    if "/.var/app/org.mozilla.firefox/" in text:
+        return "Flatpak"
+    if "/snap/firefox/" in text:
+        return "Snap"
+    if "Library/Application Support/Firefox" in text:
+        return "macOS"
+    if "Mozilla.Firefox" in text:
+        return "Store/MSIX"
+    return "system"
+
+
+def firefox_binary(profile: Path) -> str:
+    override = os.environ.get("FURR_FIREFOX_BIN")
+    if override:
+        return override
+    container = profile_container(profile)
+    if container == "Flatpak":
+        return "flatpak run org.mozilla.firefox"
+    if container == "Snap":
+        return "snap run firefox"
+    for name in ("firefox", "firefox-esr"):
+        found = shutil.which(name)
+        if found:
+            return found
+    return "unknown"
+
+
+def running_profile_paths() -> set[Path]:
+    """Profiles held open by running Firefox processes (Linux only).
+
+    Called before Firefox is shut down. Results are only used when a profile
+    is also registered in an ini file, so locks belonging to another user or
+    container cannot redirect the installation.
+    """
     proc = Path("/proc")
     if not proc.exists():
-        return None
-
-    try:
-        fds = list(proc.glob("[0-9]*/fd/*"))
-    except OSError:
-        return None
-
-    for fd in fds:
+        return set()
+    found: set[Path] = set()
+    for pid in firefox_pids():
         try:
-            target = Path(os.readlink(fd))
+            fds = list((proc / str(pid) / "fd").iterdir())
         except OSError:
             continue
-        text = str(target)
-        for marker in ("/mozilla/firefox/", "/Mozilla/Firefox/Profiles/"):
-            if marker not in text:
+        for fd in fds:
+            try:
+                text = os.readlink(fd)
+            except OSError:
                 continue
-            prefix, _, rest = text.partition(marker)
-            profile_name = rest.split("/", 1)[0]
-            if not (profile_name.endswith(".default") or ".default-" in profile_name or profile_name.startswith("Profile")):
-                continue
-            candidate = Path(prefix) / marker.strip("/") / profile_name
-            if "/.cache/" in str(candidate):
-                continue
-            if candidate.is_dir() and (candidate / "prefs.js").is_file():
-                return candidate
-    return None
+            for marker in ("/mozilla/firefox/", "/Mozilla/Firefox/Profiles/"):
+                if marker not in text:
+                    continue
+                prefix, _, rest = text.partition(marker)
+                name = rest.split("/", 1)[0]
+                candidate = Path(prefix) / marker.strip("/") / name
+                if "/.cache/" in str(candidate) or not candidate.is_dir():
+                    continue
+                try:
+                    found.add(candidate.resolve())
+                except OSError:
+                    found.add(candidate)
+    return found
+
+
+def active_profile() -> Path | None:
+    """Return the first captured active profile, if any."""
+    paths = ACTIVE_PROFILES or running_profile_paths()
+    return next(iter(paths), None) if paths else None
 
 
 def read_install_defaults(ini: Path) -> set[Path]:
@@ -974,7 +1062,11 @@ def read_profiles(ini: Path) -> list[dict[str, object]]:
     return found
 
 
-def choose_profile(specified: str | None, running: Path | None = None) -> Path:
+def choose_profile(
+    specified: str | None,
+    running: Path | None = None,
+    active: set[Path] | None = None,
+) -> Path:
     if specified:
         path = Path(os.path.expandvars(specified)).expanduser()
         if not path.is_dir():
@@ -1008,26 +1100,24 @@ def choose_profile(specified: str | None, running: Path | None = None) -> Path:
             "Specify it with: python3 install.py --profile /full/path/to/profile"
         )
 
-    running_resolved = None
+    active_resolved: set[Path] = set()
+    for candidate in (active or set()):
+        try:
+            active_resolved.add(candidate.resolve())
+        except OSError:
+            active_resolved.add(candidate)
     if running:
         try:
-            running_resolved = running.resolve()
+            active_resolved.add(running.resolve())
         except OSError:
-            running_resolved = running
-        if all(Path(item["resolved"]) != running_resolved for item in profiles):
-            profiles.append(
-                {
-                    "name": running.name,
-                    "path": running,
-                    "resolved": running_resolved,
-                    "legacy_default": False,
-                    "install_default": False,
-                }
-            )
+            active_resolved.add(running)
 
     def score(item: dict[str, object]) -> int:
-        if running_resolved is not None and Path(item["resolved"]) == running_resolved:
-            return 4
+        # The profile open at startup wins: with both system and Flatpak
+        # Firefox installed, the [Install] default alone can point at the
+        # wrong container.
+        if Path(item["resolved"]) in active_resolved:
+            return 5
         if item["install_default"]:
             return 3
         if item["legacy_default"]:
@@ -1106,7 +1196,11 @@ def get_firefox_version() -> str:
 
 
 def write_report(
-    profile: Path, stamp: str | None, targets: dict[str, Path], removed: bool
+    profile: Path,
+    stamp: str | None,
+    targets: dict[str, Path],
+    removed: bool,
+    profile_source: str = "",
 ) -> Path:
     report = Path.home() / "FurrOS-install-report.txt"
     lines = [
@@ -1117,7 +1211,10 @@ def write_report(
         f"Home:     {Path.home()}",
         f"Source:   {SOURCE}",
         f"Profile:  {profile}",
+        f"Profile source: {profile_source or 'Firefox profile lists'}",
+        f"Container:     {profile_container(profile)}",
         f"Firefox:  {get_firefox_version()}",
+        f"Firefox binary: {firefox_binary(profile)}",
     ]
 
     if removed:
@@ -1181,14 +1278,26 @@ def main() -> None:
     if not args.uninstall:
         ensure_firefox(args.skip_firefox_install)
 
-    # Close Firefox before any profile/ini file is read, created or modified.
+    # Capture the active profile before shutdown, then close Firefox and drop
+    # stale locks before touching any profile data.
+    ACTIVE_PROFILES.update(running_profile_paths())
+    if ACTIVE_PROFILES:
+        first = next(iter(ACTIVE_PROFILES))
+        print(f"Running Firefox profile: {first} ({profile_container(first)})")
     handle_running_firefox(args.force)
+    clear_stale_profile_locks()
 
     if not args.uninstall:
         create_firefox_profile()
     wait_for_all_profile_locks()
 
-    profile = choose_profile(args.profile)
+    profile = choose_profile(args.profile, active=ACTIVE_PROFILES)
+    if args.profile:
+        profile_source = "manual --profile"
+    elif any(item.resolve() == profile.resolve() for item in ACTIVE_PROFILES):
+        profile_source = f"running Firefox ({profile_container(profile)})"
+    else:
+        profile_source = "Firefox profile lists"
     targets = destinations(profile)
 
     # Avoid overwriting an existing backup when two runs happen in one second.
@@ -1203,7 +1312,7 @@ def main() -> None:
                 target.unlink()
             except FileNotFoundError:
                 pass
-        report = write_report(profile, None, targets, removed=True)
+        report = write_report(profile, None, targets, removed=True, profile_source=profile_source)
         print(f"\nFurrOS theme removed from: {profile}")
         print(f"Report saved: {report}")
         print("Start Firefox again to apply the change.")
@@ -1224,7 +1333,7 @@ def main() -> None:
 
     verify_required_pref(targets["user.js"])
 
-    report = write_report(profile, stamp, targets, removed=False)
+    report = write_report(profile, stamp, targets, removed=False, profile_source=profile_source)
     print(f"\nFurrOS theme installed in: {profile}")
     print(f"Previous files backed up with suffix .bak-{stamp}")
     print("Verified: all three theme files match the repository.")

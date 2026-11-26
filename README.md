@@ -112,15 +112,15 @@ py -3 install.py            # Windows
 ## What the installer does
 
 1. Installs Firefox if it is missing (may require an administrator password). Pass `--skip-firefox-install` / `-SkipFirefoxInstall` to disable this.
-2. Detects running Firefox processes on Linux, including Flatpak, Snap and custom binaries. With confirmation (or `--force`) it closes them with `SIGTERM`, waits, and uses `SIGKILL` only if they are still blocked.
-3. Waits for profile lock files to be released before touching any profile data.
+2. Records which profile the running Firefox actually has open (before closing it), including Flatpak, Snap and custom binaries. With confirmation (or `--force`) it closes Firefox with `SIGTERM`, waits, and uses `SIGKILL` only if it is still blocked.
+3. Removes lock files left by a previous crash (`lock`, `parent.lock`, `.parentlock`) when no Firefox process is alive, then waits for any remaining locks to be released before touching profile data.
 4. Creates an initial Firefox profile only if none exists. Existing `profiles.ini` / `installs.ini` content is preserved by appending new sections; a `.furros-profile` marker makes the profile reusable and prevents duplicates on re-runs. Windows Store/MSIX profiles are handled where Firefox actually looks.
-5. Detects the real default profile from `[Install]` in `profiles.ini` / `installs.ini`, not only the legacy `Default=1` flag. Linux, macOS, Windows, WSL, Snap, Flatpak and Store layouts are supported; stale `Profiles/profiles.ini` files from older FurrOS runs are ignored. Ties are resolved automatically: FurrOS-managed profile, then initialized, then `.default-release`, then the first path. **No profile-choice prompt is ever shown.**
+5. Selects the profile automatically: the instance that was open when installation started wins, then `[Install]` in `profiles.ini` / `installs.ini`, then the legacy `Default=1` flag. This prevents a system Firefox install from stealing a Flatpak profile (or vice versa). Linux, macOS, Windows, WSL, Snap, Flatpak and Store layouts are supported; stale `Profiles/profiles.ini` files from older FurrOS runs are ignored. Remaining ties use the FurrOS-managed profile, then initialized, then `.default-release`, then the first path. **No profile-choice prompt is ever shown.**
 6. Creates the `chrome` folder if needed.
 7. Backs up existing `userChrome.css`, `userContent.css` and `user.js` with a unique `.bak-DATE-TIME` suffix; a collision with an existing backup is avoided.
 8. Copies the three theme files and verifies them byte-for-byte.
 9. Verifies that `user.js` enables custom stylesheets.
-10. Writes `FurrOS-install-report.txt` in your home folder and asks you to start Firefox again.
+10. Writes `FurrOS-install-report.txt` in your home folder, including the selected profile, how it was chosen, the Firefox container (system/Flatpak/Snap/MSIX) and binary, then asks you to start Firefox again.
 
 Extra options:
 
@@ -188,6 +188,8 @@ Close Firefox first. This removes the three theme files; backups are kept in the
 ## Troubleshooting
 
 The installer now closes Firefox for you (with confirmation in a terminal, or with `--force` in a script). If it reports that a process or a lock file remains, close Firefox manually and re-run; it is safe to run twice and each run creates a new `.bak-DATE-TIME` backup.
+
+If the report says the files were verified but the UI does not change, check `Profile:`, `Profile source:` and `Container:` in `~/FurrOS-install-report.txt`. A Flatpak browser cannot read a system Firefox profile: the container must match the Firefox you actually launch. With both a system and a Flatpak Firefox installed, re-run the installer **while the browser you use is open** so it records the correct profile; or pass `--profile` explicitly. The CSS has no external image or font dependencies: all backgrounds are embedded as `data:` URLs, so a missing asset in `chrome/` is never the cause.
 
 Linux and macOS:
 

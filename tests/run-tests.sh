@@ -609,6 +609,7 @@ install.is_wsl = lambda: False
 install.firefox_pids = lambda: [fake_pid] if state["alive"] else []
 install.process_alive = lambda pid: state["alive"]
 install.wait_for_all_profile_locks = lambda: None
+install.clear_stale_profile_locks = lambda: None
 install.FIREFOX_CLOSE_TIMEOUT = 0
 install.FIREFOX_KILL_TIMEOUT = 0
 
@@ -636,6 +637,47 @@ PY
   pass "Python installer escalates to SIGKILL only after a timeout"
 fi
 
+if command -v python3 >/dev/null 2>&1; then
+  PYTHONPATH="$ROOT" python3 -B - <<'PY' || fail "Python active-profile or stale-lock logic failed"
+import os
+import tempfile
+from pathlib import Path
+import install
+
+root = Path(tempfile.mkdtemp())
+system_base = root / "aaa-system"
+flat_base = root / "zzz-flatpak" / ".var" / "app" / "org.mozilla.firefox" / ".mozilla" / "firefox"
+system_profile = system_base / "aaaa.default-release"
+flat_profile = flat_base / "bbbb.default-release"
+for base, profile in ((system_base, system_profile), (flat_base, flat_profile)):
+    profile.mkdir(parents=True)
+    (base / "profiles.ini").write_text(
+        "[General]\nStartWithLastProfile=1\nVersion=2\n\n"
+        "[Profile0]\nName=default-release\nIsRelative=1\nPath=" + profile.name + "\n\n"
+        "[InstallTEST]\nDefault=" + profile.name + "\nLocked=1\n",
+        encoding="utf-8",
+    )
+
+install.candidate_ini_files = lambda: [system_base / "profiles.ini", flat_base / "profiles.ini"]
+assert install.choose_profile(None) == system_profile, "tie-break should be deterministic"
+assert install.choose_profile(None, active={flat_profile}) == flat_profile, \
+    "the open Flatpak profile must beat the system [Install] default"
+
+# A lock left by a dead Firefox process must not block the next start.
+(flat_profile / "lock").symlink_to("127.0.0.1:+999999")
+(flat_profile / ".parentlock").write_text("", encoding="utf-8")
+install.firefox_pids = lambda: []
+install.process_alive = lambda pid: False
+install.clear_stale_profile_locks()
+assert not (flat_profile / "lock").is_symlink(), "stale lock symlink was kept"
+assert not (flat_profile / ".parentlock").exists(), "stale .parentlock was kept"
+PY
+  pass "active profile wins and stale locks are removed"
+fi
+
+grep -Fq 'score=5' "$ROOT/install.sh" || fail "shell installer ignores the running profile"
+grep -Fq 'active_resolved' "$ROOT/install.py" || fail "Python installer ignores the running profile"
+grep -Fq 'clear_stale_profile_locks' "$ROOT/install.sh" || fail "shell installer ignores stale locks"
 grep -Fq 'parent.lock' "$ROOT/install.sh" || fail "shell installer ignores profile locks"
 grep -Fq 'parent.lock' "$ROOT/install.py" || fail "Python installer ignores profile locks"
 grep -Fq 'SIGTERM' "$ROOT/install.sh" || fail "shell installer has no clean shutdown"
