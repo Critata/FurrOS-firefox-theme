@@ -28,7 +28,7 @@ A Firefox theme inspired by [FurrOS](https://furros.xyz/): dark chrome, chips wi
 | WSL | Linux requirements | Windows interop (`cmd.exe` and `wslpath`, enabled by default) lets `install.sh` find the Windows Firefox profile. |
 | Python alternative | Python 3.7 or newer | Not needed by `install.sh`, `install.command`, `install.bat` or `install.ps1`. |
 
-**Close Firefox completely before installing.** The theme files are read only at startup. The installer refuses to continue while Firefox is running unless you explicitly pass `--force` / `-Force`.
+**On Linux/macOS, `install.sh` and `install.py` close Firefox before writing any profile file.** In an interactive terminal they ask for confirmation; in a non-interactive shell they stop with a clear error unless you pass `--force`. They send `SIGTERM` first and use `SIGKILL` only as a fallback after a timeout, then wait for `parent.lock`, `.parentlock` and `lock` to disappear. Theme files are read only at startup, so Firefox must be restarted afterwards. `install.ps1` still requires Firefox to be closed manually, or `-Force` to override the check.
 
 ## Installation
 
@@ -112,24 +112,28 @@ py -3 install.py            # Windows
 ## What the installer does
 
 1. Installs Firefox if it is missing (may require an administrator password). Pass `--skip-firefox-install` / `-SkipFirefoxInstall` to disable this.
-2. Creates an initial Firefox profile if Firefox has never been started. Windows Store/MSIX profiles are handled where Firefox actually looks.
-3. Detects the real default profile from `[Install]` in `profiles.ini` / `installs.ini`, not only the legacy `Default=1` flag. Linux, macOS, Windows, WSL, Snap, Flatpak and Store layouts are supported; stale `Profiles/profiles.ini` files from older FurrOS runs are ignored. Ties are resolved automatically: initialized profile, then `.default-release`, then the first path. **No prompt is ever shown.**
-4. Creates the `chrome` folder if needed.
-5. Backs up existing `userChrome.css`, `userContent.css` and `user.js` with a `.bak-DATE-TIME` suffix.
-6. Copies the three theme files and verifies them byte-for-byte.
-7. Verifies that `user.js` enables custom stylesheets.
-8. Writes `FurrOS-install-report.txt` in your home folder and asks you to start Firefox again.
+2. Detects running Firefox processes on Linux, including Flatpak, Snap and custom binaries. With confirmation (or `--force`) it closes them with `SIGTERM`, waits, and uses `SIGKILL` only if they are still blocked.
+3. Waits for profile lock files to be released before touching any profile data.
+4. Creates an initial Firefox profile only if none exists. Existing `profiles.ini` / `installs.ini` content is preserved by appending new sections; a `.furros-profile` marker makes the profile reusable and prevents duplicates on re-runs. Windows Store/MSIX profiles are handled where Firefox actually looks.
+5. Detects the real default profile from `[Install]` in `profiles.ini` / `installs.ini`, not only the legacy `Default=1` flag. Linux, macOS, Windows, WSL, Snap, Flatpak and Store layouts are supported; stale `Profiles/profiles.ini` files from older FurrOS runs are ignored. Ties are resolved automatically: FurrOS-managed profile, then initialized, then `.default-release`, then the first path. **No profile-choice prompt is ever shown.**
+6. Creates the `chrome` folder if needed.
+7. Backs up existing `userChrome.css`, `userContent.css` and `user.js` with a unique `.bak-DATE-TIME` suffix; a collision with an existing backup is avoided.
+8. Copies the three theme files and verifies them byte-for-byte.
+9. Verifies that `user.js` enables custom stylesheets.
+10. Writes `FurrOS-install-report.txt` in your home folder and asks you to start Firefox again.
 
 Extra options:
 
 ```bash
-./install.sh --profile /full/path/to/profile   # manual override only
-./install.sh --force                           # install while Firefox is running
-./install.sh --skip-firefox-install            # do not install a missing Firefox
-./install.sh --uninstall                       # remove the theme files
+./install.sh --profile /full/path/to/profile     # manual override only
+./install.sh --firefox-bin /path/to/firefox      # custom binary or Snap wrapper
+./install.sh --force                             # close running Firefox without asking
+./install.sh --skip-firefox-install              # do not install a missing Firefox
+./install.sh --uninstall                         # remove the theme files
+python3 install.py --firefox-bin /path/to/firefox
 ```
 
-PowerShell equivalents: `-Profile "C:\path"`, `-Force`, `-SkipFirefoxInstall`, `-Uninstall`.
+`./install.sh --help` and `python3 install.py --help` list all options. PowerShell equivalents: `-Profile "C:\path"`, `-Force`, `-SkipFirefoxInstall`, `-Uninstall`.
 
 ## Verify the installation
 
@@ -153,7 +157,7 @@ Get-Item "$profile\chrome\userChrome.css", "$profile\chrome\userContent.css", "$
 Select-String -Path "$profile\user.js" -Pattern 'toolkit.legacyUserProfileCustomizations.stylesheets'
 ```
 
-Then start Firefox. The address bar, panels and new tab page should use the FurrOS styling. If Firefox was already open, close it completely and start it again.
+Then start Firefox. The address bar, panels and new tab page should use the FurrOS styling. If Firefox was open, the installer closed it; simply start it again.
 
 ## Uninstall
 
@@ -183,7 +187,7 @@ Close Firefox first. This removes the three theme files; backups are kept in the
 
 ## Troubleshooting
 
-First, confirm Firefox is really closed and re-run the installer; it is non-interactive and safe to run twice (the second run creates new `.bak-DATE-TIME` backups).
+The installer now closes Firefox for you (with confirmation in a terminal, or with `--force` in a script). If it reports that a process or a lock file remains, close Firefox manually and re-run; it is safe to run twice and each run creates a new `.bak-DATE-TIME` backup.
 
 Linux and macOS:
 
@@ -231,7 +235,40 @@ cd /path/to/FurrOS-firefox-theme
 ./tests/run-tests.sh
 ```
 
-The suite runs locally without network access and does not touch a real profile. It uses `FURR_FIREFOX_BIN` as a stub so no package manager or browser is started. It covers Linux, simulated macOS and simulated Windows/WSL profile detection, first-run profile creation, deterministic tie-breaks, non-interactive launchers, Store/MSIX paths and byte-for-byte file copies. PowerShell and CMD scripts are checked statically here because PowerShell is not available in this Linux test environment; real end-to-end runs on Windows, macOS Intel and macOS Apple Silicon still require manual verification.
+The suite runs locally without network access and does not touch a real profile. It uses `FURR_FIREFOX_BIN` as a stub so no package manager or browser is started. It covers Linux, simulated macOS and simulated Windows/WSL profile detection, first-run profile creation, deterministic tie-breaks, non-interactive launchers, Store/MSIX paths and byte-for-byte file copies. It also simulates a running Linux Firefox with a lock file and verifies clean shutdown, lock release, ini preservation and idempotent re-runs. PowerShell and CMD scripts are checked statically here because PowerShell is not available in this Linux test environment; real end-to-end runs on Windows, macOS Intel and macOS Apple Silicon still require manual verification.
+
+### Manual test on Linux
+
+With Firefox closed:
+
+```bash
+cd /path/to/FurrOS-firefox-theme
+./install.sh
+grep '^Profile:' ~/FurrOS-install-report.txt
+./install.sh        # no duplicate profile, only a new .bak-DATE-TIME backup
+```
+
+With Firefox open, in an interactive terminal:
+
+```bash
+cd /path/to/FurrOS-firefox-theme
+./install.sh        # answer y when asked to close Firefox
+```
+
+From a script or another non-interactive context:
+
+```bash
+./install.sh --force
+```
+
+Expected output: `Firefox is running (PID: ...)`, `Closing Firefox cleanly (SIGTERM)...` and `Firefox closed; profile locks released.` The browser must exit without data loss, the lock files must disappear, the three theme files must be installed in the profile shown in the report, and a second run must not add another `[Profile]` or `[Install]` section to `profiles.ini`. To test a non-default installation, point the installer at it explicitly:
+
+```bash
+./install.sh --firefox-bin /snap/bin/firefox
+python3 install.py --firefox-bin /path/to/custom/firefox
+```
+
+Flatpak and Snap are detected automatically; `--firefox-bin` is only needed for a custom location.
 
 ## Release
 

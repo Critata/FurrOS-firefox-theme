@@ -474,5 +474,178 @@ PY
   pass "Python installer matches macOS layout and never prompts"
 fi
 
+# Linux: Firefox open, lock file present, --force closes it cleanly.
+RUN_BIN="$TMP/runbin"
+mkdir -p "$RUN_BIN"
+cat > "$RUN_BIN/pgrep" <<'EOF'
+#!/bin/sh
+# Only report the fake Firefox PID supplied by the test.
+if [ "$1" = "-x" ] && [ "$2" = "firefox" ] && [ -n "${FAKE_FIREFOX_PIDS:-}" ]; then
+  printf '%s\n' "$FAKE_FIREFOX_PIDS"
+  exit 0
+fi
+exit 1
+EOF
+cat > "$RUN_BIN/fake-firefox" <<'EOF'
+#!/bin/sh
+trap 'rm -f "$FAKE_LOCK"; exit 0' TERM
+: > "$FAKE_LOCK"
+while :; do sleep 0.2; done
+EOF
+chmod +x "$RUN_BIN/pgrep" "$RUN_BIN/fake-firefox"
+
+RUN_HOME="$TMP/runhome"
+RUN_PROFILE="$RUN_HOME/.config/mozilla/firefox/abcd1234.default-release"
+mkdir -p "$RUN_PROFILE"
+cat > "$RUN_HOME/.config/mozilla/firefox/profiles.ini" <<EOF
+[General]
+StartWithLastProfile=1
+Version=2
+
+[Profile0]
+Name=default-release
+IsRelative=1
+Path=abcd1234.default-release
+
+[Install12345678]
+Default=abcd1234.default-release
+Locked=1
+EOF
+
+FAKE_LOCK="$RUN_PROFILE/parent.lock" "$RUN_BIN/fake-firefox" &
+FAKE_PID=$!
+for _ in $(seq 1 50); do
+  [[ -f "$RUN_PROFILE/parent.lock" ]] && break
+  sleep 0.1
+done
+[[ -f "$RUN_PROFILE/parent.lock" ]] || fail "fake Firefox did not create its lock file"
+
+FAKE_FIREFOX_PIDS="$FAKE_PID" FAKE_LOCK="$RUN_PROFILE/parent.lock" \
+  PATH="$RUN_BIN:$PATH" HOME="$RUN_HOME" FURR_FIREFOX_BIN="$BIN/fake-firefox" \
+  "$ROOT/install.sh" --force </dev/null > "$TMP/run-install.out" 2>&1 \
+  || { cat "$TMP/run-install.out" >&2; fail "installer failed with Firefox running"; }
+
+grep -Fq 'Closing Firefox cleanly (SIGTERM)' "$TMP/run-install.out" \
+  || { cat "$TMP/run-install.out" >&2; fail "installer did not close Firefox cleanly"; }
+grep -Fq 'profile locks released' "$TMP/run-install.out" \
+  || { cat "$TMP/run-install.out" >&2; fail "installer did not wait for profile locks"; }
+for _ in $(seq 1 50); do
+  kill -0 "$FAKE_PID" 2>/dev/null || break
+  sleep 0.1
+done
+if kill -0 "$FAKE_PID" 2>/dev/null; then
+  fail "Firefox process survived the installer"
+fi
+wait "$FAKE_PID" 2>/dev/null || true
+[[ ! -e "$RUN_PROFILE/parent.lock" ]] || fail "stale lock file was left behind"
+for file in userChrome.css userContent.css; do
+  cmp -s "$ROOT/$file" "$RUN_PROFILE/chrome/$file" || fail "$file missing with Firefox running"
+done
+pass "Linux installer closes Firefox cleanly and waits for lock release"
+
+# First run with an existing [Install] section: append, never rewrite;
+# repeated runs must not create a second profile or lose custom settings.
+IDEM_HOME="$TMP/idemhome"
+IDEM_BASE="$IDEM_HOME/.config/mozilla/firefox"
+mkdir -p "$IDEM_BASE"
+cat > "$IDEM_BASE/profiles.ini" <<'EOF'
+[General]
+StartWithLastProfile=1
+Version=2
+CustomKey=keep-me
+
+[Install12345678]
+Default=missing.default-release
+Locked=1
+EOF
+
+PATH="$BIN:$PATH" HOME="$IDEM_HOME" FURR_FIREFOX_BIN="$BIN/fake-firefox" \
+  "$ROOT/install.sh" </dev/null > "$TMP/idem-first.out" 2>&1 \
+  || { cat "$TMP/idem-first.out" >&2; fail "first idempotency run failed"; }
+grep -Fq 'Created Firefox profile' "$TMP/idem-first.out" \
+  || { cat "$TMP/idem-first.out" >&2; fail "no profile was created on first run"; }
+grep -Fq 'CustomKey=keep-me' "$IDEM_BASE/profiles.ini" \
+  || fail "existing ini settings were overwritten"
+grep -Fq '[Install12345678]' "$IDEM_BASE/profiles.ini" \
+  || fail "existing [Install] section was overwritten"
+IDEM_PROFILE=""
+for item in "$IDEM_BASE"/*.default-release; do
+  [[ -d "$item" ]] && IDEM_PROFILE="$item"
+done
+[[ -n "$IDEM_PROFILE" ]] || fail "managed profile was not created"
+[[ -f "$IDEM_PROFILE/.furros-profile" ]] || fail "managed profile has no marker"
+PROFILES_BEFORE="$(grep -c '^\[Profile' "$IDEM_BASE/profiles.ini")"
+INSTALLS_BEFORE="$(grep -c '^\[Install' "$IDEM_BASE/profiles.ini")"
+
+COLLISION="$(date +%Y%m%d-%H%M%S)"
+printf 'sentinel' > "$IDEM_PROFILE/user.js.bak-$COLLISION"
+PATH="$BIN:$PATH" HOME="$IDEM_HOME" FURR_FIREFOX_BIN="$BIN/fake-firefox" \
+  "$ROOT/install.sh" </dev/null > "$TMP/idem-second.out" 2>&1 \
+  || { cat "$TMP/idem-second.out" >&2; fail "second idempotency run failed"; }
+grep -Fq 'Reusing FurrOS-managed profile' "$TMP/idem-second.out" \
+  || { cat "$TMP/idem-second.out" >&2; fail "second run did not reuse the managed profile"; }
+if grep -Fq 'Created Firefox profile' "$TMP/idem-second.out"; then
+  fail "second run created a duplicate profile"
+fi
+[[ "$(grep -c '^\[Profile' "$IDEM_BASE/profiles.ini")" == "$PROFILES_BEFORE" ]] \
+  || fail "second run duplicated a [Profile] section"
+[[ "$(grep -c '^\[Install' "$IDEM_BASE/profiles.ini")" == "$INSTALLS_BEFORE" ]] \
+  || fail "second run duplicated an [Install] section"
+[[ "$(cat "$IDEM_PROFILE/user.js.bak-$COLLISION")" == "sentinel" ]] \
+  || fail "second run overwrote an existing backup"
+[[ "$(find "$IDEM_PROFILE" -maxdepth 1 -name 'user.js.bak-*' | wc -l | tr -d '[:space:]')" -ge 2 ]] \
+  || fail "second run did not create a new unique backup"
+pass "profile creation is idempotent and backups never collide"
+
+if command -v python3 >/dev/null 2>&1; then
+  PYTHONPATH="$ROOT" python3 -B - <<'PY' || fail "Python shutdown logic failed"
+import signal
+import install
+
+state = {"alive": True, "kills": []}
+fake_pid = 424242
+
+install.is_wsl = lambda: False
+install.firefox_pids = lambda: [fake_pid] if state["alive"] else []
+install.process_alive = lambda pid: state["alive"]
+install.wait_for_all_profile_locks = lambda: None
+install.FIREFOX_CLOSE_TIMEOUT = 0
+install.FIREFOX_KILL_TIMEOUT = 0
+
+# Clean shutdown: SIGTERM is enough.
+def clean(pids, sig):
+    state["kills"].append(sig)
+    if sig == signal.SIGTERM:
+        state["alive"] = False
+
+install.terminate_processes = clean
+install.handle_running_firefox(True)
+assert state["kills"] == [signal.SIGTERM], state["kills"]
+
+# Stuck process: SIGKILL is only a fallback after the timeout.
+state.update(alive=True, kills=[])
+def stuck(pids, sig):
+    state["kills"].append(sig)
+    if sig == signal.SIGKILL:
+        state["alive"] = False
+
+install.terminate_processes = stuck
+install.handle_running_firefox(True)
+assert state["kills"] == [signal.SIGTERM, signal.SIGKILL], state["kills"]
+PY
+  pass "Python installer escalates to SIGKILL only after a timeout"
+fi
+
+grep -Fq 'parent.lock' "$ROOT/install.sh" || fail "shell installer ignores profile locks"
+grep -Fq 'parent.lock' "$ROOT/install.py" || fail "Python installer ignores profile locks"
+grep -Fq 'SIGTERM' "$ROOT/install.sh" || fail "shell installer has no clean shutdown"
+grep -Fq 'SIGKILL' "$ROOT/install.py" || fail "Python installer has no forced shutdown fallback"
+grep -Fq -- '--firefox-bin' "$ROOT/install.sh" || fail "shell installer has no binary override"
+grep -Fq -- '--firefox-bin' "$ROOT/install.py" || fail "Python installer has no binary override"
+if grep -Eq '^[[:space:]]*kill -9([[:space:]]|$)' "$ROOT/install.sh"; then
+  fail "shell installer uses kill -9 as a first resort"
+fi
+pass "both installers implement safe shutdown, locks and a binary override"
+
 echo
 echo "All tests passed."

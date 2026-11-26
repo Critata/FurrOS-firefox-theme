@@ -9,10 +9,13 @@ from __future__ import annotations
 
 import argparse
 import configparser
+import csv
 import hashlib
 import os
 import platform
+import re
 import secrets
+import signal
 import shutil
 import subprocess
 import sys
@@ -24,6 +27,16 @@ from pathlib import Path
 SOURCE = Path(__file__).resolve().parent
 THEME_FILES = ("userChrome.css", "userContent.css", "user.js")
 REQUIRED_PREF = 'user_pref("toolkit.legacyUserProfileCustomizations.stylesheets", true);'
+MANAGED_MARKER = ".furros-profile"
+FIREFOX_CLOSE_TIMEOUT = 15
+FIREFOX_KILL_TIMEOUT = 5
+LOCK_TIMEOUT = 15
+# Match names and full command lines; the latter catches Flatpak, Snap and
+# custom binaries without matching this installer's own path.
+FIREFOX_CMD_PATTERN = re.compile(
+    r"(?:^|/)(?:firefox|firefox-bin|firefox-esr|org\.mozilla\.firefox)(?:\s|$)"
+    r"|/Mozilla/Firefox/|/snap/firefox/|/org\.mozilla\.firefox/"
+)
 
 
 def sha256(path: Path) -> str:
@@ -103,39 +116,292 @@ def windows_store_firefox_dir() -> Path | None:
     return None
 
 
-def firefox_running() -> bool:
-    system = platform.system()
-    if system == "Windows":
+EXACT_FIREFOX_NAMES = frozenset(
+    ("firefox", "firefox-bin", "firefox-esr", "org.mozilla.firefox")
+)
+
+
+def own_pid_tree() -> set[int]:
+    """PIDs of this installer and its ancestors; never signal those."""
+    current = os.getpid()
+    result = {current}
+    proc = Path("/proc")
+    for _ in range(32):
+        parent: int | None = None
+        if (proc / str(current) / "stat").is_file():
+            try:
+                stat = (proc / str(current) / "stat").read_text(
+                    encoding="utf-8", errors="ignore"
+                )
+                parent = int(stat.rsplit(")", 1)[1].split()[1])
+            except (OSError, ValueError, IndexError):
+                parent = None
+        if parent is None and hasattr(os, "getppid"):
+            parent = os.getppid()
+        if parent is None or parent in result or parent <= 0:
+            break
+        result.add(parent)
+        current = parent
+    return result
+
+
+def process_alive(pid: int) -> bool:
+    stat = Path(f"/proc/{pid}/stat")
+    if stat.is_file():
+        try:
+            state = stat.read_text(encoding="utf-8", errors="ignore").rsplit(")", 1)[1].split()[0]
+            if state == "Z":
+                return False
+            return True
+        except (OSError, ValueError, IndexError):
+            return True
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+    return True
+
+
+def firefox_pids() -> list[int]:
+    """Firefox PIDs, including Flatpak, Snap and custom binary paths."""
+    exclude = own_pid_tree()
+    found: set[int] = set()
+
+    proc = Path("/proc")
+    if proc.is_dir():
+        for entry in proc.iterdir():
+            if not entry.name.isdigit():
+                continue
+            pid = int(entry.name)
+            if pid in exclude:
+                continue
+            try:
+                cmdline = (entry / "cmdline").read_bytes().replace(b"\0", b" ").decode(
+                    "utf-8", errors="ignore"
+                )
+            except OSError:
+                continue
+            if not cmdline:
+                continue
+            stat = entry / "stat"
+            try:
+                state = stat.read_text(encoding="utf-8", errors="ignore").rsplit(")", 1)[1].split()[0]
+            except (OSError, ValueError, IndexError):
+                state = ""
+            if state == "Z":
+                continue
+            comm = ""
+            try:
+                comm = (entry / "comm").read_text(encoding="utf-8", errors="ignore").strip()
+            except OSError:
+                pass
+            if comm in EXACT_FIREFOX_NAMES or FIREFOX_CMD_PATTERN.search(cmdline):
+                found.add(pid)
+    else:
+        for name in EXACT_FIREFOX_NAMES:
+            try:
+                output = subprocess.check_output(
+                    ["pgrep", "-x", name], text=True, errors="ignore", timeout=10
+                )
+            except Exception:
+                continue
+            found.update(int(value) for value in output.split() if value.isdigit())
         try:
             output = subprocess.check_output(
-                ["tasklist"], text=True, errors="ignore", timeout=10
+                ["pgrep", "-f", FIREFOX_CMD_PATTERN.pattern],
+                text=True,
+                errors="ignore",
+                timeout=10,
             )
-            if "firefox.exe" in output.lower():
-                return True
+            found.update(int(value) for value in output.split() if value.isdigit())
         except Exception:
             pass
-    elif is_wsl():
+
+    return sorted(pid for pid in found if pid not in exclude and process_alive(pid))
+
+
+def ini_profile_paths(ini: Path) -> list[Path]:
+    """Existing profile directories referenced by an ini Path= entry."""
+    found: list[Path] = []
+    try:
+        lines = ini.read_text(encoding="utf-8", errors="ignore").splitlines()
+    except OSError:
+        return found
+    for line in lines:
+        key, separator, value = line.partition("=")
+        if not separator or key.strip() != "Path":
+            continue
+        path = Path(os.path.expandvars(value.strip())).expanduser()
+        if not path.is_absolute():
+            path = ini.parent / path
+        if path.is_dir() and path not in found:
+            found.append(path)
+    return found
+
+
+def wait_for_profile_locks(profile: Path, timeout: int = LOCK_TIMEOUT) -> None:
+    locks = ("parent.lock", ".parentlock", "lock")
+    deadline = time.monotonic() + timeout
+    while True:
+        present = [name for name in locks if (profile / name).exists()]
+        if not present:
+            return
+        if time.monotonic() >= deadline:
+            raise SystemExit(
+                f"Error: Firefox lock file still present in {profile} after {timeout}s: "
+                + ", ".join(present)
+                + "\nTerminate Firefox completely, then run the installer again."
+            )
+        time.sleep(0.2)
+
+
+def wait_for_all_profile_locks() -> None:
+    for ini in candidate_ini_files():
+        for profile in ini_profile_paths(ini):
+            wait_for_profile_locks(profile)
+
+
+def terminate_processes(pids: list[int], sig: int) -> None:
+    for pid in pids:
+        try:
+            os.kill(pid, sig)
+        except (ProcessLookupError, PermissionError, OSError):
+            pass
+
+
+def windows_firefox_pids() -> list[int]:
+    try:
+        output = subprocess.check_output(
+            ["tasklist", "/FO", "CSV", "/NH"], text=True, errors="ignore", timeout=10
+        )
+    except Exception:
+        return []
+    pids: list[int] = []
+    for line in output.splitlines():
+        if "firefox.exe" not in line.lower():
+            continue
+        try:
+            fields = next(csv.reader([line]))
+            pids.append(int(fields[1]))
+        except (StopIteration, ValueError, IndexError):
+            continue
+    return pids
+
+
+def windows_terminate(pids: list[int], force: bool) -> None:
+    for pid in pids:
+        command = ["taskkill", "/PID", str(pid), "/T"]
+        if force:
+            command.append("/F")
+        try:
+            subprocess.run(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=15)
+        except Exception:
+            pass
+
+
+def handle_running_firefox(force: bool) -> None:
+    if is_wsl():
         try:
             output = subprocess.check_output(
                 ["tasklist.exe"], text=True, errors="ignore", timeout=10
             )
             if "firefox.exe" in output.lower():
-                return True
+                raise SystemExit(
+                    "Error: Firefox is running on the Windows side (WSL).\n"
+                    "Close it in Windows and retry, or run install.ps1 from Windows."
+                )
+        except SystemExit:
+            raise
         except Exception:
             pass
 
-    # Match process names only. Matching full command lines would also match
-    # this installer when its path contains "firefox".
-    for name in ("firefox", "firefox-bin", "firefox-esr", "org.mozilla.firefox"):
-        try:
-            output = subprocess.check_output(
-                ["pgrep", "-x", name], text=True, errors="ignore", timeout=10
+    windows = platform.system() == "Windows"
+    scan = windows_firefox_pids if windows else firefox_pids
+
+    def alive(pending: list[int]) -> list[int]:
+        if windows:
+            running_now = set(windows_firefox_pids())
+            return [pid for pid in pending if pid in running_now]
+        return [pid for pid in pending if process_alive(pid)]
+
+    pids = scan()
+    if not pids:
+        return
+
+    print(f"Firefox is running (PID: {', '.join(str(pid) for pid in pids)}).")
+    print("Theme files are loaded only at startup, so Firefox must be closed first.")
+
+    if not force:
+        if not sys.stdin.isatty():
+            raise SystemExit(
+                "Error: Firefox is running and this session is not interactive.\n"
+                "Close Firefox and retry, or run with --force to close it automatically."
             )
-        except Exception:
-            continue
-        if output.strip():
-            return True
-    return False
+        try:
+            answer = input("Close Firefox now? [y/N] ")
+        except EOFError:
+            answer = ""
+        if answer.strip().lower() not in ("y", "yes"):
+            raise SystemExit("Aborted: Firefox was left running.")
+
+    print(
+        "Closing Firefox cleanly..."
+        if windows
+        else "Closing Firefox cleanly (SIGTERM)..."
+    )
+    known = set(pids)
+    if windows:
+        windows_terminate(pids, force=False)
+    else:
+        terminate_processes(pids, signal.SIGTERM)
+    deadline = time.monotonic() + FIREFOX_CLOSE_TIMEOUT
+    remaining: list[int] = list(pids)
+    while time.monotonic() < deadline:
+        remaining = alive(list(known))
+        current = [pid for pid in scan() if pid not in known]
+        if current:
+            known.update(current)
+            if windows:
+                windows_terminate(current, force=False)
+            else:
+                terminate_processes(current, signal.SIGTERM)
+        if not remaining and not current:
+            break
+        time.sleep(0.2)
+
+    if alive(list(known)):
+        print(
+            f"Warning: Firefox did not exit within {FIREFOX_CLOSE_TIMEOUT}s. "
+            + ("Forcing termination (taskkill /F)." if windows else "Forcing termination (SIGKILL)."),
+            file=sys.stderr,
+        )
+        if windows:
+            windows_terminate(list(known), force=True)
+        else:
+            terminate_processes(list(known), signal.SIGKILL)
+        deadline = time.monotonic() + FIREFOX_KILL_TIMEOUT
+        while time.monotonic() < deadline:
+            if not alive(list(known)):
+                break
+            time.sleep(0.2)
+
+    left = scan()
+    if left:
+        raise SystemExit(
+            "Error: Firefox could not be closed (PID: "
+            + ", ".join(str(pid) for pid in left)
+            + ").\nClose it manually and run the installer again."
+        )
+    wait_for_all_profile_locks()
+    print("Firefox closed; profile locks released.")
+
+
+def firefox_running() -> bool:
+    return bool(firefox_pids())
 
 
 def command_works(command: list[str]) -> bool:
@@ -417,8 +683,11 @@ def ensure_firefox(skip: bool) -> None:
         return
     if skip:
         raise SystemExit(
-            "Error: Firefox is not installed.\n"
-            "Install it manually, or run the installer without --skip-firefox-install."
+            "Error: Firefox was not found on this system.\n"
+            "Install it with your package manager, or pass --firefox-bin /path/to/firefox.\n"
+            "Examples: sudo apt install firefox | sudo dnf install firefox | "
+            "flatpak install flathub org.mozilla.firefox\n"
+            "Remove --skip-firefox-install to let this installer try automatically."
         )
 
     print("Firefox not found. Installing it automatically...")
@@ -432,7 +701,8 @@ def ensure_firefox(skip: bool) -> None:
     except Exception as exc:
         raise SystemExit(
             f"Error: could not install Firefox automatically. {exc}\n"
-            "Install Firefox manually, then run this installer again."
+            "Install Firefox manually (apt/dnf/yum/zypper/pacman/snap/flatpak) and retry,\n"
+            "or pass --firefox-bin /path/to/firefox if your browser is in a custom location."
         )
 
     # The override is only for detecting a missing browser before installation.
@@ -446,15 +716,49 @@ def ensure_firefox(skip: bool) -> None:
     print("Firefox installed successfully.")
 
 
+def append_ini_sections(path: Path, section: str, body: str) -> None:
+    """Append a section only when absent, preserving existing ini content."""
+    header = f"[{section}]"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        content = path.read_text(encoding="utf-8", errors="ignore")
+    except OSError:
+        content = ""
+    if any(line.strip() == header for line in content.splitlines()):
+        return
+    addition = f"{header}\n{body}\n"
+    if content and not content.endswith("\n"):
+        addition = "\n" + addition
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(("\n" if content else "") + addition)
+
+
+def next_profile_index(ini: Path) -> int:
+    try:
+        content = ini.read_text(encoding="utf-8", errors="ignore")
+    except OSError:
+        return 0
+    indices = [
+        int(match.group(1))
+        for match in re.finditer(r"^\[Profile(\d+)\]\s*$", content, re.MULTILINE)
+    ]
+    return max(indices) + 1 if indices else 0
+
+
 def create_firefox_profile() -> None:
-    # Never create a second profile: Firefox may already use one in another
-    # standard location (for example ~/.config/mozilla/firefox on Linux).
+    # Reuse a profile previously created by this project: the marker makes
+    # repeated runs idempotent without adding another [Profile] section.
     for candidate in candidate_ini_files():
-        try:
-            if "[Profile" in candidate.read_text(encoding="utf-8", errors="ignore"):
+        for path in ini_profile_paths(candidate):
+            if (path / MANAGED_MARKER).is_file():
+                print(f"Reusing FurrOS-managed profile: {path}")
                 return
-        except OSError:
-            pass
+
+    # Never create a second profile when Firefox already has one in any
+    # standard location (including Flatpak and Snap).
+    for candidate in candidate_ini_files():
+        if ini_profile_paths(candidate):
+            return
 
     system = platform.system()
     installs_ini: Path | None = None
@@ -493,42 +797,23 @@ def create_firefox_profile() -> None:
     base.mkdir(parents=True, exist_ok=True)
     profile_id = secrets.token_hex(4)
     profile_dir = f"{profile_id}.default-release"
-    (base / profile_dir).mkdir(parents=True, exist_ok=True)
+    profile_path = base / profile_dir
+    profile_path.mkdir(parents=True, exist_ok=True)
+    (profile_path / MANAGED_MARKER).touch()
     default_path = relative.format(profile_dir=profile_dir)
-    ini.write_text(
-        "\n".join(
-            (
-                "[General]",
-                "StartWithLastProfile=1",
-                "Version=2",
-                "",
-                f"[Install{profile_id}]",
-                f"Default={default_path}",
-                "Locked=1",
-                "",
-                "[Profile0]",
-                "Name=default-release",
-                "IsRelative=1",
-                f"Path={default_path}",
-                "Default=1",
-                "",
-            )
-        ),
-        encoding="utf-8",
+
+    append_ini_sections(ini, "General", "StartWithLastProfile=1\nVersion=2")
+    append_ini_sections(ini, f"Install{profile_id}", f"Default={default_path}\nLocked=1")
+    append_ini_sections(
+        ini,
+        f"Profile{next_profile_index(ini)}",
+        f"Name=default-release\nIsRelative=1\nPath={default_path}\nDefault=1",
     )
     if installs_ini is not None:
-        installs_ini.write_text(
-            "\n".join(
-                (
-                    f"[Install{profile_id}]",
-                    f"Default={default_path}",
-                    "Locked=1",
-                    "",
-                )
-            ),
-            encoding="utf-8",
+        append_ini_sections(
+            installs_ini, f"Install{profile_id}", f"Default={default_path}\nLocked=1"
         )
-    print(f"Created Firefox profile: {base / profile_dir}")
+    print(f"Created Firefox profile: {profile_path}")
 
 
 def candidate_ini_files() -> list[Path]:
@@ -752,11 +1037,18 @@ def choose_profile(specified: str | None, running: Path | None = None) -> Path:
     # Automatic selection only. Score first, then an initialized profile,
     # then default-release, then the lexicographically first path.
     # Never ask the user to choose a profile.
-    def tie_key(item: dict[str, object]) -> tuple[int, int, int, str]:
+    def tie_key(item: dict[str, object]) -> tuple[int, int, int, int, str]:
         resolved = Path(item["resolved"])
+        managed = (resolved / MANAGED_MARKER).is_file()
         established = (resolved / "prefs.js").is_file() or (resolved / "user.js").is_file()
         preferred = resolved.name.endswith(".default-release")
-        return (-score(item), -int(established), -int(preferred), str(resolved))
+        return (
+            -score(item),
+            -int(managed),
+            -int(established),
+            -int(preferred),
+            str(resolved),
+        )
 
     selected = Path(sorted(profiles, key=tie_key)[0]["path"])
     print(f"Selected profile: {selected}")
@@ -783,7 +1075,11 @@ def verify_required_pref(user_js: Path) -> None:
 
 
 def get_firefox_version() -> str:
-    commands = [
+    override = os.environ.get("FURR_FIREFOX_BIN")
+    commands = []
+    if override:
+        commands.append([override, "--version"])
+    commands += [
         ["firefox", "--version"],
         ["firefox.exe", "--version"],
     ]
@@ -847,7 +1143,14 @@ def main() -> None:
     )
     parser.add_argument("--profile", help="Use this Firefox profile instead of detecting it")
     parser.add_argument(
-        "--force", action="store_true", help="Install even if Firefox is running"
+        "--firefox-bin",
+        metavar="PATH",
+        help="Use this Firefox binary (Snap/custom; Flatpak is auto-detected)",
+    )
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Close a running Firefox automatically, without asking",
     )
     parser.add_argument("--uninstall", action="store_true", help="Remove the theme files")
     parser.add_argument(
@@ -869,22 +1172,30 @@ def main() -> None:
             file=sys.stderr,
         )
 
+    if args.firefox_bin:
+        binary = Path(os.path.expandvars(args.firefox_bin)).expanduser()
+        if not binary.is_file() or not os.access(binary, os.X_OK):
+            raise SystemExit(f"Error: Firefox binary is not executable: {binary}")
+        os.environ["FURR_FIREFOX_BIN"] = str(binary)
+
     if not args.uninstall:
         ensure_firefox(args.skip_firefox_install)
+
+    # Close Firefox before any profile/ini file is read, created or modified.
+    handle_running_firefox(args.force)
+
+    if not args.uninstall:
         create_firefox_profile()
+    wait_for_all_profile_locks()
 
-    if not args.force and firefox_running():
-        raise SystemExit(
-            "Error: Firefox is still running.\n"
-            "Close every Firefox window completely, then run the installer again.\n"
-            "The theme files are loaded only at startup.\n"
-            "Use --force only if you know what you are doing."
-        )
-
-    running = active_profile() if args.force else None
-    profile = choose_profile(args.profile, running)
+    profile = choose_profile(args.profile)
     targets = destinations(profile)
+
+    # Avoid overwriting an existing backup when two runs happen in one second.
     stamp = time.strftime("%Y%m%d-%H%M%S")
+    while any(target.with_name(f"{target.name}.bak-{stamp}").exists() for target in targets.values()):
+        time.sleep(1)
+        stamp = time.strftime("%Y%m%d-%H%M%S")
 
     if args.uninstall:
         for target in targets.values():

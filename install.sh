@@ -22,6 +22,14 @@ UNINSTALL=0
 SKIP_FIREFOX_INSTALL=0
 REPORT="$HOME/FurrOS-install-report.txt"
 REQUIRED_PREF='user_pref("toolkit.legacyUserProfileCustomizations.stylesheets", true);'
+MANAGED_MARKER='.furros-profile'
+FIREFOX_CLOSE_TIMEOUT=15
+FIREFOX_KILL_TIMEOUT=5
+LOCK_TIMEOUT=15
+
+trim() {
+  printf '%s' "$1" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//'
+}
 
 # WSL reports a Linux kernel, but Windows Firefox keeps its profile under
 # %APPDATA%. Interop is enabled by default, so cmd.exe and wslpath are
@@ -38,13 +46,17 @@ Usage: ./install.sh [options]
 
 Options:
   --profile PATH          Use this Firefox profile instead of detecting it
-  --force                 Install even if Firefox is running (not recommended)
+  --firefox-bin PATH      Use this Firefox binary (Snap/custom; Flatpak is auto-detected)
+  --force                 Close a running Firefox automatically, without asking
   --uninstall             Remove the theme files (backups are kept)
   --skip-firefox-install  Do not install Firefox automatically if missing
   -h, --help              Show this message
 
-Firefox is installed automatically when missing. Close Firefox completely
-before installing the theme: the theme files are read only at startup.
+Firefox is installed automatically when missing. If Firefox is running, the
+installer asks for confirmation in an interactive terminal and closes it with
+SIGTERM, then SIGKILL only after a timeout. In a non-interactive shell, pass
+--force to allow the automatic shutdown. The theme files are read only at
+startup.
 EOF
 }
 
@@ -53,6 +65,12 @@ while [[ $# -gt 0 ]]; do
     --profile)
       [[ $# -ge 2 ]] || { echo "Error: --profile requires a path." >&2; exit 1; }
       PROFILE="$2"
+      shift 2
+      ;;
+    --firefox-bin)
+      [[ $# -ge 2 ]] || { echo "Error: --firefox-bin requires a path." >&2; exit 1; }
+      [[ -x "$2" ]] || { echo "Error: Firefox binary is not executable: $2" >&2; exit 1; }
+      export FURR_FIREFOX_BIN="$2"
       shift 2
       ;;
     --force)
@@ -110,21 +128,233 @@ windows_ini_candidates() {
   printf '%s\n' "$dir/profiles.ini" "$dir/installs.ini"
 }
 
-firefox_running() {
-  command -v pgrep >/dev/null 2>&1 || return 1
-  for name in firefox firefox-bin firefox-esr org.mozilla.firefox; do
-    if pgrep -x "$name" >/dev/null 2>&1; then
-      return 0
+# Match exact process names and the full command line. The second part is
+# what catches Flatpak, Snap and custom binaries. The pattern deliberately
+# requires a path/word boundary so this installer's own path (which contains
+# "firefox-theme") is not mistaken for a browser process.
+FIREFOX_CMD_PATTERN='(^|/)(firefox|firefox-bin|firefox-esr|org\.mozilla\.firefox)([[:space:]]|$)|/Mozilla/Firefox/|/snap/firefox/|/org\.mozilla\.firefox/'
+
+firefox_pids() {
+  local pid seen=() out=() cmd state
+  local -a found=()
+
+  if command -v pgrep >/dev/null 2>&1; then
+    for name in firefox firefox-bin firefox-esr org.mozilla.firefox; do
+      while IFS= read -r pid; do
+        [[ -n "$pid" ]] && found+=("$pid")
+      done < <(pgrep -x "$name" 2>/dev/null || true)
+    done
+    while IFS= read -r pid; do
+      [[ -n "$pid" ]] && found+=("$pid")
+    done < <(pgrep -f "$FIREFOX_CMD_PATTERN" 2>/dev/null || true)
+  elif [[ -d /proc ]]; then
+    # Minimal environments without procps: read /proc directly.
+    for cmd in /proc/[0-9]*/cmdline; do
+      [[ -r "$cmd" ]] || continue
+      pid="${cmd#/proc/}"
+      pid="${pid%/cmdline}"
+      cmd="$(tr '\0' ' ' < "$cmd" 2>/dev/null)" || continue
+      if [[ "$cmd" =~ $FIREFOX_CMD_PATTERN ]]; then
+        found+=("$pid")
+      fi
+    done
+  elif command -v ps >/dev/null 2>&1; then
+    while IFS= read -r pid; do
+      [[ -n "$pid" ]] && found+=("$pid")
+    done < <(ps -eo pid=,args= 2>/dev/null | grep -E "$FIREFOX_CMD_PATTERN" | awk '{print $1}' || true)
+  fi
+
+  # pgrep -f and ps also see this installer and its ancestors when a path or
+  # argument contains "firefox". Never signal our own process tree.
+  for pid in "${found[@]}"; do
+    is_own_process_tree "$pid" && continue
+    if [[ -d "/proc/$pid" ]]; then
+      if [[ -r "/proc/$pid/stat" ]]; then
+        state="$(awk '{print $3}' "/proc/$pid/stat" 2>/dev/null)" || continue
+        [[ "$state" == "Z" ]] && continue
+      fi
+    else
+      # pgrep may report a PID that exited a moment ago.
+      kill -0 "$pid" 2>/dev/null || continue
+    fi
+    if [[ " ${seen[*]-} " != *" $pid "* ]]; then
+      seen+=("$pid")
+      out+=("$pid")
     fi
   done
+  printf '%s\n' "${out[*]-}"
+}
 
-  # A Windows Firefox process is not visible in the WSL process tree.
-  if [[ "$WSL" -eq 1 ]] && command -v tasklist.exe >/dev/null 2>&1; then
-    if tasklist.exe 2>/dev/null | grep -qi 'firefox.exe'; then
-      return 0
+is_own_process_tree() {
+  local pid="$1" current="$$" parent guard=0 stat_line
+  [[ "$pid" == "$current" ]] && return 0
+  while [[ -n "$current" && "$current" != "0" && $guard -lt 32 ]]; do
+    [[ "$pid" == "$current" ]] && return 0
+    if [[ -r "/proc/$current/stat" ]]; then
+      # Field 4 is the parent PID. comm may contain spaces or parentheses,
+      # so strip everything up to the last closing parenthesis first.
+      stat_line="$(sed 's/^.*) //' "/proc/$current/stat" 2>/dev/null)" || break
+      parent="$(printf '%s' "$stat_line" | awk '{print $2}')"
+    else
+      parent="$(ps -o ppid= -p "$current" 2>/dev/null | tr -d ' ')" || break
     fi
-  fi
+    [[ -n "$parent" && "$parent" =~ ^[0-9]+$ ]] || break
+    current="$parent"
+    guard=$((guard + 1))
+  done
   return 1
+}
+
+firefox_running() {
+  [[ -n "$(firefox_pids)" ]]
+}
+
+process_alive() {
+  local pid="$1" state
+  kill -0 "$pid" 2>/dev/null || return 1
+  if [[ -r "/proc/$pid/stat" ]]; then
+    state="$(awk '{print $3}' "/proc/$pid/stat" 2>/dev/null)" || return 0
+    [[ "$state" != "Z" ]] || return 1
+  fi
+  return 0
+}
+
+# Parse Path= entries from an ini file and print existing profile directories.
+ini_profile_paths() {
+  local ini="$1" base line key value path
+  [[ -f "$ini" ]] || return 0
+  base="$(cd "$(dirname "$ini")" && pwd -P)"
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    line="$(trim "$line")"
+    [[ "$line" == *=* ]] || continue
+    key="$(trim "${line%%=*}")"
+    value="$(trim "${line#*=}")"
+    [[ "$key" == "Path" ]] || continue
+    if [[ "$value" == /* ]]; then
+      path="$value"
+    else
+      path="$base/$value"
+    fi
+    [[ -d "$path" ]] && printf '%s\n' "$path"
+  done < "$ini"
+}
+
+managed_profiles_in_ini() {
+  local path
+  while IFS= read -r path; do
+    [[ -f "$path/$MANAGED_MARKER" ]] && printf '%s\n' "$path"
+  done < <(ini_profile_paths "$1")
+}
+
+wait_for_profile_locks() {
+  local profile="$1" seconds="${2:-$LOCK_TIMEOUT}" i=0 locks="" found
+  while :; do
+    found=""
+    for name in parent.lock .parentlock lock; do
+      [[ -e "$profile/$name" ]] && found+=" $name"
+    done
+    [[ -z "$found" ]] && return 0
+    if (( i >= seconds * 5 )); then
+      echo "Error: Firefox lock file still present in $profile after ${seconds}s:${found}" >&2
+      echo "Terminate Firefox completely, then run the installer again." >&2
+      return 1
+    fi
+    sleep 0.2
+    i=$((i + 1))
+  done
+}
+
+wait_for_all_profile_locks() {
+  local candidate path
+  while IFS= read -r candidate; do
+    [[ -f "$candidate" ]] || continue
+    while IFS= read -r path; do
+      wait_for_profile_locks "$path" || return 1
+    done < <(ini_profile_paths "$candidate")
+  done < <(profile_ini_candidates)
+  return 0
+}
+
+handle_running_firefox() {
+  local pids answer i pid existing remaining="" newpids="" known
+  local -a pid_array=() remaining_array=() new_array=()
+
+  pids="$(firefox_pids)"
+  [[ -n "$pids" ]] || return 0
+
+  read -ra pid_array <<< "$pids"
+  echo "Firefox is running (PID: ${pid_array[*]})."
+  echo "Theme files are loaded only at startup, so Firefox must be closed first."
+
+  if [[ "$FORCE" -ne 1 ]]; then
+    if [[ ! -t 0 ]]; then
+      echo "Error: Firefox is running and this session is not interactive." >&2
+      echo "Close Firefox and retry, or run with --force to close it automatically." >&2
+      return 1
+    fi
+    read -rp "Close Firefox now? [y/N] " answer
+    case "$answer" in
+      y|Y|yes|YES) ;;
+      *)
+        echo "Aborted: Firefox was left running." >&2
+        return 1
+        ;;
+    esac
+  fi
+
+  echo "Closing Firefox cleanly (SIGTERM)..."
+  kill -TERM "${pid_array[@]}" 2>/dev/null || true
+  for ((i = 0; i < FIREFOX_CLOSE_TIMEOUT * 5; i++)); do
+    remaining=""
+    for pid in "${pid_array[@]}"; do
+      process_alive "$pid" && remaining+=" $pid"
+    done
+    # Snap and Flatpak launchers can leave children behind: pick up any new
+    # Firefox process and signal it too, instead of failing at the end.
+    newpids="$(firefox_pids)"
+    if [[ -n "$newpids" ]]; then
+      read -ra new_array <<< "$newpids"
+      for pid in "${new_array[@]}"; do
+        known=0
+        for existing in "${pid_array[@]}"; do
+          if [[ "$existing" == "$pid" ]]; then
+            known=1
+            break
+          fi
+        done
+        if [[ "$known" -eq 0 ]]; then
+          pid_array+=("$pid")
+          kill -TERM "$pid" 2>/dev/null || true
+        fi
+      done
+    fi
+    [[ -z "$remaining" && -z "$newpids" ]] && break
+    sleep 0.2
+  done
+
+  if [[ -n "$remaining" || -n "$newpids" ]]; then
+    echo "Warning: Firefox did not exit within ${FIREFOX_CLOSE_TIMEOUT}s. Forcing termination (SIGKILL)." >&2
+    read -ra remaining_array <<< "$remaining $newpids"
+    kill -KILL "${remaining_array[@]}" 2>/dev/null || true
+    for ((i = 0; i < FIREFOX_KILL_TIMEOUT * 5; i++)); do
+      remaining=""
+      for pid in "${remaining_array[@]}"; do
+        process_alive "$pid" && remaining+=" $pid"
+      done
+      [[ -z "$remaining" ]] && break
+      sleep 0.2
+    done
+  fi
+
+  newpids="$(firefox_pids)"
+  if [[ -n "$newpids" ]]; then
+    echo "Error: Firefox could not be closed (PID: $newpids)." >&2
+    echo "Close it manually and run the installer again." >&2
+    return 1
+  fi
+  wait_for_all_profile_locks || return 1
+  echo "Firefox closed; profile locks released."
+  return 0
 }
 
 firefox_ready() {
@@ -335,8 +565,10 @@ ensure_firefox() {
   fi
 
   if [[ "$SKIP_FIREFOX_INSTALL" -eq 1 ]]; then
-    echo "Error: Firefox is not installed." >&2
-    echo "Install it manually, or run the installer without --skip-firefox-install." >&2
+    echo "Error: Firefox was not found on this system." >&2
+    echo "Install it with your package manager, or pass --firefox-bin /path/to/firefox." >&2
+    echo "Examples: sudo apt install firefox | sudo dnf install firefox | flatpak install flathub org.mozilla.firefox" >&2
+    echo "Remove --skip-firefox-install to let this installer try automatically." >&2
     exit 1
   fi
 
@@ -344,8 +576,9 @@ ensure_firefox() {
   case "$(uname -s)" in
     Linux)
       install_firefox_linux || {
-        echo "Error: could not install Firefox automatically." >&2
-        echo "Install Firefox manually, then run this installer again." >&2
+        echo "Error: could not install Firefox automatically on this Linux system." >&2
+        echo "Install it manually (apt/dnf/yum/zypper/pacman/snap/flatpak) and retry," >&2
+        echo "or pass --firefox-bin /path/to/firefox if your browser is in a custom location." >&2
         exit 1
       }
       ;;
@@ -393,17 +626,60 @@ profile_ini_candidates() {
   windows_ini_candidates
 }
 
-create_firefox_profile() {
-  local candidate base ini installs_ini default_path id dir found=0 os
+append_ini_sections() {
+  local file="$1" section="$2" body="$3" header
+  header="[$section]"
+  if [[ -f "$file" ]] && grep -Fqx "$header" "$file"; then
+    return 0
+  fi
+  if [[ ! -s "$file" ]]; then
+    printf '%s\n%s\n' "$header" "$body" > "$file"
+  else
+    printf '\n%s\n%s\n' "$header" "$body" >> "$file"
+  fi
+}
 
-  # Never create a second profile: Firefox may already use a profile in a
-  # different standard location (for example ~/.config/mozilla/firefox).
+next_profile_index() {
+  local file="$1" line n max=-1
+  [[ -f "$file" ]] || { printf '0'; return; }
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    line="$(trim "$line")"
+    if [[ "$line" =~ ^\[Profile([0-9]+)\]$ ]]; then
+      n="${BASH_REMATCH[1]}"
+      (( n > max )) && max="$n"
+    fi
+  done < "$file"
+  printf '%d' "$((max + 1))"
+}
+
+create_firefox_profile() {
+  local candidate base ini installs_ini default_path id dir found=0 os managed index
+
+  # Reuse a profile previously created by this project. It carries a marker
+  # file, so re-runs never add a second FurrOS profile.
   while IFS= read -r candidate; do
     [[ -f "$candidate" ]] || continue
-    if grep -q '^\[Profile' "$candidate"; then
+    while IFS= read -r managed; do
+      if [[ -d "$managed" ]]; then
+        echo "Reusing FurrOS-managed profile: $managed"
+        return 0
+      fi
+    done < <(managed_profiles_in_ini "$candidate")
+  done < <(profile_ini_candidates)
+
+  # Never create a second profile when Firefox already has a usable profile
+  # in any standard location (including Flatpak and Snap). Reading Path=
+  # directly also covers ini files that only contain [Install...] entries.
+  while IFS= read -r candidate; do
+    [[ -f "$candidate" ]] || continue
+    while IFS= read -r path; do
+      # An existing directory registered in an ini is a Firefox profile,
+      # even when Firefox has not written prefs.js yet. Creating another one
+      # here would leave the user with two competing defaults.
       found=1
       break
-    fi
+    done < <(ini_profile_paths "$candidate")
+    [[ "$found" -eq 1 ]] && break
   done < <(profile_ini_candidates)
   [[ "$found" -eq 1 ]] && return 0
 
@@ -426,6 +702,7 @@ create_firefox_profile() {
     ini="$base/profiles.ini"
   fi
 
+  mkdir -p "$(dirname "$ini")" "$base"
   id="$(openssl rand -hex 4 2>/dev/null || printf 'furros%s' "$$")"
   id="${id:0:8}"
   dir="${id}.default-release"
@@ -436,87 +713,42 @@ create_firefox_profile() {
     default_path="$dir"
   fi
 
+  index="$(next_profile_index "$ini")"
   mkdir -p "$base/$dir"
-  cat > "$ini" <<EOF
-[General]
-StartWithLastProfile=1
-Version=2
+  : > "$base/$dir/$MANAGED_MARKER"
 
-[Install$id]
-Default=$default_path
-Locked=1
-
-[Profile0]
-Name=default-release
+  # Append instead of rewriting: existing [General]/[Install] sections and
+  # unrelated user settings must survive a first FurrOS installation.
+  if [[ ! -s "$ini" ]]; then
+    printf '[General]\nStartWithLastProfile=1\nVersion=2\n' > "$ini"
+  fi
+  append_ini_sections "$ini" "Install$id" "Default=$default_path
+Locked=1"
+  append_ini_sections "$ini" "Profile$index" "Name=default-release
 IsRelative=1
 Path=$default_path
-Default=1
-EOF
+Default=1"
   if [[ -n "$installs_ini" ]]; then
-    cat > "$installs_ini" <<EOF
-[Install$id]
-Default=$default_path
-Locked=1
-EOF
+    append_ini_sections "$installs_ini" "Install$id" "Default=$default_path
+Locked=1"
   fi
   echo "Created Firefox profile: $base/$dir"
 }
 
 if [[ "$UNINSTALL" -ne 1 ]]; then
   ensure_firefox
+fi
+
+# Close Firefox before any profile/ini file is read, created or modified.
+handle_running_firefox || exit 1
+
+if [[ "$UNINSTALL" -ne 1 ]]; then
   create_firefox_profile
 fi
 
-if [[ "$FORCE" -ne 1 ]] && firefox_running; then
-  echo "Error: Firefox is still running." >&2
-  echo "Close every Firefox window completely, then run the installer again." >&2
-  echo "The theme files are loaded only at startup." >&2
-  echo "If you really know what you are doing: ./install.sh --force" >&2
-  exit 1
-fi
-
-running_profile() {
-  local link target rest profile prefix candidate
-
-  [[ -d /proc ]] || return 1
-  for link in /proc/[0-9]*/fd/*; do
-    [[ -L "$link" ]] || continue
-    target="$(readlink "$link" 2>/dev/null)" || continue
-
-    case "$target" in
-      */mozilla/firefox/*)
-        rest="${target#*/mozilla/firefox/}"
-        profile="${rest%%/*}"
-        prefix="${target%%/mozilla/firefox/*}"
-        candidate="$prefix/mozilla/firefox/$profile"
-        ;;
-      */Mozilla/Firefox/Profiles/*)
-        rest="${target#*/Mozilla/Firefox/Profiles/}"
-        profile="${rest%%/*}"
-        prefix="${target%%/Mozilla/Firefox/Profiles/*}"
-        candidate="$prefix/Mozilla/Firefox/Profiles/$profile"
-        ;;
-      *)
-        continue
-        ;;
-    esac
-
-    case "$profile" in
-      *.default*|Profile*) ;;
-      *) continue ;;
-    esac
-    [[ -d "$candidate" ]] || continue
-    [[ "$candidate" != */.cache/* ]] || continue
-    [[ -f "$candidate/prefs.js" || -f "$candidate/user.js" ]] || continue
-    printf '%s\n' "$candidate"
-    return 0
-  done
-  return 1
-}
-
-trim() {
-  printf '%s' "$1" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//'
-}
+# Wait again after profile creation: a slow shutdown may leave a lock file
+# behind even when the process is already gone.
+wait_for_all_profile_locks || exit 1
 
 PROFILES=()
 INIS=()
@@ -642,13 +874,11 @@ if [[ -z "$PROFILE" ]]; then
     exit 1
   fi
 
-  ACTIVE=""
-  [[ "$FORCE" -eq 1 ]] && ACTIVE="$(running_profile || true)"
-
-  # Automatic selection only. Score: 4 = currently running, 3 = Firefox
-  # [Install] default, 2 = legacy [Profile] Default=1, 1 = other profile.
-  # Ties are resolved automatically: initialized profile first, then
-  # default-release, then the lexicographically first path. Never prompt.
+  # Firefox is already closed at this point, so selection is based only on
+  # the ini files. Score: 3 = Firefox [Install] default, 2 = legacy
+  # [Profile] Default=1, 1 = other profile. Ties are resolved automatically:
+  # FurrOS-managed profile, then initialized, then default-release, then the
+  # lexicographically first path. Never prompt.
   SCORED=()
   for entry in "${PROFILES[@]}"; do
     flag="${entry%%$'\t'*}"
@@ -660,8 +890,9 @@ if [[ -z "$PROFILE" ]]; then
     for default_path in "${INSTALL_DEFAULTS[@]}"; do
       [[ "$default_path" == "$path" ]] && score=3
     done
-    [[ -n "$ACTIVE" && "$ACTIVE" == "$path" ]] && score=4
 
+    managed=0
+    [[ -f "$path/$MANAGED_MARKER" ]] && managed=1
     established=0
     [[ -f "$path/prefs.js" || -f "$path/user.js" ]] && established=1
     preferred=0
@@ -669,21 +900,11 @@ if [[ -z "$PROFILE" ]]; then
       *.default-release) preferred=1 ;;
     esac
 
-    SCORED+=("$score"$'\t'"$established"$'\t'"$preferred"$'\t'"$path")
+    SCORED+=("$score"$'\t'"$managed"$'\t'"$established"$'\t'"$preferred"$'\t'"$path")
   done
 
-  if [[ -n "$ACTIVE" ]]; then
-    known=0
-    for entry in "${SCORED[@]}"; do
-      [[ "${entry##*$'\t'}" == "$ACTIVE" ]] && known=1
-    done
-    if [[ "$known" -eq 0 ]]; then
-      SCORED+=("4"$'\t'"1"$'\t'"0"$'\t'"$ACTIVE")
-    fi
-  fi
-
   BEST="$(printf '%s\n' "${SCORED[@]}" \
-    | LC_ALL=C sort -t $'\t' -k1,1nr -k2,2nr -k3,3nr -k4,4 \
+    | LC_ALL=C sort -t $'\t' -k1,1nr -k2,2nr -k3,3nr -k4,4nr -k5,5 \
     | sed -n '1p')"
   PROFILE="${BEST##*$'\t'}"
   echo "Selected profile: $PROFILE"
@@ -701,9 +922,24 @@ if [[ ! -d "$PROFILE" ]]; then
 fi
 
 CHROME="$PROFILE/chrome"
+
+# Final guard immediately before any write: a profile can be locked by a
+# Firefox instance that started while the installer was running.
+wait_for_profile_locks "$PROFILE" || exit 1
+
+# Avoid overwriting an existing backup when two runs happen in one second.
 TS="$(date +%Y%m%d-%H%M%S)"
+while [[ -e "$PROFILE/user.js.bak-$TS" \
+  || -e "$CHROME/userChrome.css.bak-$TS" \
+  || -e "$CHROME/userContent.css.bak-$TS" ]]; do
+  sleep 1
+  TS="$(date +%Y%m%d-%H%M%S)"
+done
 
 version() {
+  if [[ -n "${FURR_FIREFOX_BIN:-}" && -x "$FURR_FIREFOX_BIN" ]]; then
+    "$FURR_FIREFOX_BIN" --version 2>/dev/null && return 0
+  fi
   firefox --version 2>/dev/null \
     || firefox-esr --version 2>/dev/null \
     || flatpak run org.mozilla.firefox --version 2>/dev/null \
