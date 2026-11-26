@@ -2,6 +2,8 @@
 
 A Firefox theme inspired by [FurrOS](https://furros.xyz/): dark chrome, chips with ink borders, sticker shadows, and a paw + FurrOS wordmark on the new tab page.
 
+![FurrOS Firefox theme](screenshot.png)
+
 ## Contents
 
 - `userChrome.css` — Firefox UI: oval address bar, attached dropdown, menus and panels.
