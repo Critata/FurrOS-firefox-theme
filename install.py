@@ -299,9 +299,12 @@ def create_firefox_profile() -> None:
         installs_ini = firefox_dir / "installs.ini"
         relative = "Profiles/{profile_dir}"
     elif system == "Darwin":
-        base = Path.home() / "Library" / "Application Support" / "Firefox" / "Profiles"
-        ini = base / "profiles.ini"
-        relative = "{profile_dir}"
+        firefox_dir = Path.home() / "Library" / "Application Support" / "Firefox"
+        base = firefox_dir / "Profiles"
+        ini = firefox_dir / "profiles.ini"
+        installs_ini = firefox_dir / "installs.ini"
+        # Paths are relative to the folder containing profiles.ini.
+        relative = "Profiles/{profile_dir}"
     elif shutil.which("flatpak") and command_works(
         ["flatpak", "run", "org.mozilla.firefox"]
     ):
@@ -396,9 +399,17 @@ def candidate_ini_files() -> list[Path]:
             home / "Mozilla" / "Firefox" / "installs.ini",
         ]
     elif platform.system() == "Darwin":
-        raw.append(
-            home / "Library" / "Application Support" / "Firefox" / "Profiles" / "profiles.ini"
-        )
+        # On macOS profiles.ini and installs.ini live one level above
+        # the Profiles folder, exactly like %APPDATA%\Mozilla\Firefox
+        # on Windows. Both are needed to find the real default profile.
+        firefox_dir = home / "Library" / "Application Support" / "Firefox"
+        raw += [firefox_dir / "profiles.ini", firefox_dir / "installs.ini"]
+        # A profiles.ini inside Profiles was written by older FurrOS
+        # installers. Ignore it when Firefox's real ini files exist.
+        if not (firefox_dir / "profiles.ini").is_file() and not (
+            firefox_dir / "installs.ini"
+        ).is_file():
+            raw.append(firefox_dir / "Profiles" / "profiles.ini")
     else:
         config_home = os.environ.get("XDG_CONFIG_HOME") or str(home / ".config")
         raw += [
@@ -559,6 +570,16 @@ def choose_profile(specified: str | None, running: Path | None = None) -> Path:
             running_resolved = running.resolve()
         except OSError:
             running_resolved = running
+        if all(Path(item["resolved"]) != running_resolved for item in profiles):
+            profiles.append(
+                {
+                    "name": running.name,
+                    "path": running,
+                    "resolved": running_resolved,
+                    "legacy_default": False,
+                    "install_default": False,
+                }
+            )
 
     def score(item: dict[str, object]) -> int:
         if running_resolved is not None and Path(item["resolved"]) == running_resolved:
@@ -569,48 +590,18 @@ def choose_profile(specified: str | None, running: Path | None = None) -> Path:
             return 2
         return 1
 
-    ranked = sorted(profiles, key=score, reverse=True)
+    # Automatic selection only. Score first, then an initialized profile,
+    # then default-release, then the lexicographically first path.
+    # Never ask the user to choose a profile.
+    def tie_key(item: dict[str, object]) -> tuple[int, int, int, str]:
+        resolved = Path(item["resolved"])
+        established = (resolved / "prefs.js").is_file() or (resolved / "user.js").is_file()
+        preferred = resolved.name.endswith(".default-release")
+        return (-score(item), -int(established), -int(preferred), str(resolved))
 
-    if running_resolved is not None and all(
-        Path(item["resolved"]) != running_resolved for item in ranked
-    ):
-        ranked.insert(
-            0,
-            {
-                "name": running.name,
-                "path": running,
-                "resolved": running_resolved,
-                "legacy_default": False,
-                "install_default": False,
-                "_score": 4,
-            },
-        )
-
-    def rank(item: dict[str, object]) -> int:
-        return int(item.get("_score", score(item)))
-
-    ranked.sort(key=rank, reverse=True)
-    top_score = rank(ranked[0])
-    top = [item for item in ranked if rank(item) == top_score]
-    rest = [item for item in ranked if rank(item) != top_score]
-
-    if len(top) == 1:
-        selected = Path(top[0]["path"])
-        print(f"Selected profile: {selected}")
-        return selected
-
-    choices = top + rest
-    print("\nMultiple Firefox profiles found:")
-    for index, item in enumerate(choices, 1):
-        value = rank(item)
-        marker = {4: " (running)", 3: " (default)", 2: " (legacy default)"}.get(value, "")
-        print(f"  {index}. {item['name']}{marker} — {item['path']}")
-
-    while True:
-        answer = input("Choose the profile number: ").strip()
-        if answer.isdigit() and 1 <= int(answer) <= len(choices):
-            return Path(choices[int(answer) - 1]["path"])
-        print("Invalid choice.")
+    selected = Path(sorted(profiles, key=tie_key)[0]["path"])
+    print(f"Selected profile: {selected}")
+    return selected
 
 
 def destinations(profile: Path) -> dict[str, Path]:

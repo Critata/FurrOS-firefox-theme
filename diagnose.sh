@@ -25,6 +25,8 @@ for INI in \
   "$HOME/.config/mozilla/firefox/profiles.ini" \
   "$HOME/snap/firefox/common/.mozilla/firefox/profiles.ini" \
   "$HOME/.var/app/org.mozilla.firefox/.mozilla/firefox/profiles.ini" \
+  "$HOME/Library/Application Support/Firefox/profiles.ini" \
+  "$HOME/Library/Application Support/Firefox/installs.ini" \
   "$HOME/Library/Application Support/Firefox/Profiles/profiles.ini"; do
   [[ -f "$INI" ]] || continue
   DUPLICATE=0

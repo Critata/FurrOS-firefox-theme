@@ -35,7 +35,7 @@ python3 install.py
 
 **Close Firefox completely before running the installer.** The theme files are read only when Firefox starts. If Firefox is still running, the installer stops with an error. It writes a detailed report to `FurrOS-install-report.txt` in your home folder.
 
-If you have multiple profiles or want to choose one manually:
+Profile selection is automatic: the installer uses the profile Firefox actually starts with and never asks you to choose. Use `--profile` only as a manual override for an unusual layout:
 
 ```bash
 ./install.sh --profile /full/path/to/profile
@@ -53,7 +53,7 @@ The installer:
 
 1. installs Firefox if it is missing;
 2. creates an initial Firefox profile if Firefox has never been started;
-3. detects the real default profile from the `[Install]` section of `profiles.ini` (not only the legacy `Default=1` flag), including Linux, macOS, Windows, Snap and Flatpak, and never creates a duplicate profile;
+3. detects the real default profile from the `[Install]` section of `profiles.ini`/`installs.ini` (not only the legacy `Default=1` flag), including Linux, macOS, Windows, Snap and Flatpak, and never creates a duplicate profile; ties are resolved automatically without any prompt;
 4. creates the `chrome` folder if needed;
 5. backs up the existing `userChrome.css`, `userContent.css` and `user.js` with a `.bak-DATE-TIME` suffix;
 6. copies the theme files and verifies them byte-for-byte;
@@ -80,6 +80,7 @@ Close Firefox first. This removes the three theme files. Your backups are kept i
 - The new tab page uses `#150B11` as its background. Wallpaper tiles from the customize pencil are translated into three embedded FurrOS images behind the wordmark.
 - Uploading your own image does not apply a background: the wordmark stays without any extra background image.
 - On Windows, Firefox keeps `profiles.ini` and `installs.ini` in `%APPDATA%\Mozilla\Firefox\`, one level above the `Profiles` folder. The installer reads both files (also for Microsoft Store installs) so the theme goes into the profile Firefox actually uses.
+- On macOS, Firefox keeps `profiles.ini` and `installs.ini` in `~/Library/Application Support/Firefox/`, one level above the `Profiles` folder. The installer reads both files, so the first run writes into the same profile Firefox uses and no second run is needed.
 - Tested on Firefox 161, Linux/Wayland. Other versions may need small adjustments.
 
 ## Troubleshooting
@@ -94,7 +95,7 @@ If nothing changes after the install:
 
 ## Tests
 
-Run `./tests/run-tests.sh` from a checkout. It verifies that the installer selects the real `[Install]` default profile, leaves the legacy `Default=1` profile untouched, creates no duplicate profile and copies all three theme files byte-for-byte.
+Run `./tests/run-tests.sh` from a checkout. It verifies that the installer selects the real `[Install]` default profile on Linux, Windows and macOS (including first-run profile creation), leaves the legacy `Default=1` profile untouched, never prompts for a profile, creates no duplicate profile and copies all three theme files byte-for-byte.
 
 ## Release
 

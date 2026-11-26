@@ -253,17 +253,28 @@ ensure_firefox() {
 }
 
 profile_ini_candidates() {
+  # On macOS Firefox keeps profiles.ini and installs.ini one level above the
+  # Profiles folder, exactly like %APPDATA%\Mozilla\Firefox on Windows.
   printf '%s\n' \
     "$HOME/.mozilla/firefox/profiles.ini" \
     "${XDG_CONFIG_HOME:-$HOME/.config}/mozilla/firefox/profiles.ini" \
     "$HOME/.config/mozilla/firefox/profiles.ini" \
     "$HOME/snap/firefox/common/.mozilla/firefox/profiles.ini" \
     "$HOME/.var/app/org.mozilla.firefox/.mozilla/firefox/profiles.ini" \
-    "$HOME/Library/Application Support/Firefox/Profiles/profiles.ini"
+    "$HOME/Library/Application Support/Firefox/profiles.ini" \
+    "$HOME/Library/Application Support/Firefox/installs.ini"
+
+  # A profiles.ini inside Profiles was written by older FurrOS installers.
+  # Ignore it when Firefox's real ini files exist: it describes the ghost
+  # profile created by the first, broken run.
+  if [[ ! -f "$HOME/Library/Application Support/Firefox/profiles.ini" \
+    && ! -f "$HOME/Library/Application Support/Firefox/installs.ini" ]]; then
+    printf '%s\n' "$HOME/Library/Application Support/Firefox/Profiles/profiles.ini"
+  fi
 }
 
 create_firefox_profile() {
-  local candidate base ini id dir found=0
+  local candidate base ini installs_ini default_path id dir found=0 os
 
   # Never create a second profile: Firefox may already use a profile in a
   # different standard location (for example ~/.config/mozilla/firefox).
@@ -276,34 +287,58 @@ create_firefox_profile() {
   done < <(profile_ini_candidates)
   [[ "$found" -eq 1 ]] && return 0
 
-  if [[ "$(uname -s)" == "Darwin" ]]; then
+  os="$(uname -s)"
+  installs_ini=""
+  if [[ "$os" == "Darwin" ]]; then
     base="$HOME/Library/Application Support/Firefox/Profiles"
+    ini="$HOME/Library/Application Support/Firefox/profiles.ini"
+    installs_ini="$HOME/Library/Application Support/Firefox/installs.ini"
   elif command -v flatpak >/dev/null 2>&1 \
     && flatpak run org.mozilla.firefox --version >/dev/null 2>&1; then
     base="$HOME/.var/app/org.mozilla.firefox/.mozilla/firefox"
+    ini="$base/profiles.ini"
   elif command -v snap >/dev/null 2>&1 \
     && snap run firefox --version >/dev/null 2>&1; then
     base="$HOME/snap/firefox/common/.mozilla/firefox"
+    ini="$base/profiles.ini"
   else
     base="${XDG_CONFIG_HOME:-$HOME/.config}/mozilla/firefox"
+    ini="$base/profiles.ini"
   fi
 
-  ini="$base/profiles.ini"
   id="$(openssl rand -hex 4 2>/dev/null || printf 'furros%s' "$$")"
   id="${id:0:8}"
   dir="${id}.default-release"
+  if [[ "$os" == "Darwin" ]]; then
+    # Paths are relative to the folder containing profiles.ini.
+    default_path="Profiles/$dir"
+  else
+    default_path="$dir"
+  fi
+
   mkdir -p "$base/$dir"
   cat > "$ini" <<EOF
+[General]
+StartWithLastProfile=1
+Version=2
+
 [Install$id]
-Default=$dir
+Default=$default_path
 Locked=1
 
 [Profile0]
 Name=default-release
 IsRelative=1
-Path=$dir
+Path=$default_path
 Default=1
 EOF
+  if [[ -n "$installs_ini" ]]; then
+    cat > "$installs_ini" <<EOF
+[Install$id]
+Default=$default_path
+Locked=1
+EOF
+  fi
   echo "Created Firefox profile: $base/$dir"
 }
 
@@ -490,13 +525,14 @@ if [[ -z "$PROFILE" ]]; then
   ACTIVE=""
   [[ "$FORCE" -eq 1 ]] && ACTIVE="$(running_profile || true)"
 
-  # Score: 4 = currently running, 3 = Firefox [Install] default,
-  # 2 = legacy [Profile] Default=1, 1 = other profile.
+  # Automatic selection only. Score: 4 = currently running, 3 = Firefox
+  # [Install] default, 2 = legacy [Profile] Default=1, 1 = other profile.
+  # Ties are resolved automatically: initialized profile first, then
+  # default-release, then the lexicographically first path. Never prompt.
   SCORED=()
   for entry in "${PROFILES[@]}"; do
     flag="${entry%%$'\t'*}"
     rest="${entry#*$'\t'}"
-    name="${rest%%$'\t'*}"
     path="${rest##*$'\t'}"
 
     score=1
@@ -506,7 +542,14 @@ if [[ -z "$PROFILE" ]]; then
     done
     [[ -n "$ACTIVE" && "$ACTIVE" == "$path" ]] && score=4
 
-    SCORED+=("$score"$'\t'"$name"$'\t'"$path")
+    established=0
+    [[ -f "$path/prefs.js" || -f "$path/user.js" ]] && established=1
+    preferred=0
+    case "$path" in
+      *.default-release) preferred=1 ;;
+    esac
+
+    SCORED+=("$score"$'\t'"$established"$'\t'"$preferred"$'\t'"$path")
   done
 
   if [[ -n "$ACTIVE" ]]; then
@@ -515,67 +558,15 @@ if [[ -z "$PROFILE" ]]; then
       [[ "${entry##*$'\t'}" == "$ACTIVE" ]] && known=1
     done
     if [[ "$known" -eq 0 ]]; then
-      SCORED+=("4"$'\t'"$(basename "$ACTIVE")"$'\t'"$ACTIVE")
+      SCORED+=("4"$'\t'"1"$'\t'"0"$'\t'"$ACTIVE")
     fi
   fi
 
-  ORDERED=()
-  for score in 4 3 2 1; do
-    for entry in "${SCORED[@]}"; do
-      [[ "${entry%%$'\t'*}" == "$score" ]] && ORDERED+=("$entry")
-    done
-  done
-
-  TOP=()
-  REST=()
-  top_score="${ORDERED[0]%%$'\t'*}"
-  for entry in "${ORDERED[@]}"; do
-    if [[ "${entry%%$'\t'*}" == "$top_score" ]]; then
-      TOP+=("$entry")
-    else
-      REST+=("$entry")
-    fi
-  done
-
-  if [[ ${#TOP[@]} -eq 1 ]]; then
-    PROFILE="${TOP[0]##*$'\t'}"
-    echo "Selected profile: $PROFILE"
-  else
-    CHOICES=("${TOP[@]}" "${REST[@]}")
-    echo
-    echo "Multiple Firefox profiles found:"
-    LABELS=()
-    for entry in "${CHOICES[@]}"; do
-      score="${entry%%$'\t'*}"
-      rest="${entry#*$'\t'}"
-      name="${rest%%$'\t'*}"
-      path="${rest##*$'\t'}"
-      marker=""
-      case "$score" in
-        4) marker=" (running)" ;;
-        3) marker=" (default)" ;;
-        2) marker=" (legacy default)" ;;
-      esac
-      LABELS+=("$name$marker — $path")
-    done
-
-    PS3="Choose the profile number: "
-    select label in "${LABELS[@]}"; do
-      if [[ -z "$label" ]]; then
-        echo "Invalid choice." >&2
-        exit 1
-      fi
-      index=0
-      for candidate in "${LABELS[@]}"; do
-        index=$((index + 1))
-        if [[ "$candidate" == "$label" ]]; then
-          break
-        fi
-      done
-      PROFILE="${CHOICES[$((index - 1))]##*$'\t'}"
-      break
-    done
-  fi
+  BEST="$(printf '%s\n' "${SCORED[@]}" \
+    | LC_ALL=C sort -t $'\t' -k1,1nr -k2,2nr -k3,3nr -k4,4 \
+    | sed -n '1p')"
+  PROFILE="${BEST##*$'\t'}"
+  echo "Selected profile: $PROFILE"
 fi
 
 PROFILE="${PROFILE/#\~/$HOME}"
