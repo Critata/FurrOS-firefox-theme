@@ -1,17 +1,36 @@
 #!/usr/bin/env bash
-# POSIX-style installer for Linux and macOS.
+# Bash installer for Linux, macOS and WSL.
 # Installs Firefox automatically if it is missing.
 # No Python required: Firefox profiles are detected directly from profiles.ini.
 
 set -euo pipefail
 
-SRC="$(cd "$(dirname "$0")" && pwd -P)"
+# Resolve symlinks so a launcher placed elsewhere still finds the theme files.
+SELF="$0"
+while [[ -L "$SELF" ]]; do
+  LINK="$(readlink "$SELF")"
+  if [[ "$LINK" == /* ]]; then
+    SELF="$LINK"
+  else
+    SELF="$(dirname "$SELF")/$LINK"
+  fi
+done
+SRC="$(cd "$(dirname "$SELF")" && pwd -P)"
 PROFILE=""
 FORCE=0
 UNINSTALL=0
 SKIP_FIREFOX_INSTALL=0
 REPORT="$HOME/FurrOS-install-report.txt"
 REQUIRED_PREF='user_pref("toolkit.legacyUserProfileCustomizations.stylesheets", true);'
+
+# WSL reports a Linux kernel, but Windows Firefox keeps its profile under
+# %APPDATA%. Interop is enabled by default, so cmd.exe and wslpath are
+# normally available; if they are not, the installer simply ignores Windows
+# profiles and documents how to run install.ps1 instead.
+WSL=0
+if [[ "$(uname -s)" == "Linux" && "$(uname -r)" == *[Mm]icrosoft* ]]; then
+  WSL=1
+fi
 
 usage() {
   cat <<'EOF'
@@ -62,15 +81,49 @@ done
 
 echo "FurrOS Firefox theme installer — starting..."
 
+# sudo changes HOME on Linux/macOS; without this warning the installer would
+# happily write into root's Firefox profile instead of the user's.
+if [[ "$(id -u)" -eq 0 && ( "$HOME" == "/root" || "$HOME" == "/var/root" ) ]]; then
+  echo "Warning: running as root targets $HOME. Run as the desktop user instead" >&2
+  echo "unless you intentionally want to change root's Firefox profile." >&2
+fi
+
 trap 'code=$?; if [[ $code -ne 0 ]]; then echo; echo "INSTALL FAILED (exit $code)."; echo "Report: $REPORT"; [[ -t 0 ]] && read -rp "Press Enter to close..." || true; fi' EXIT
+
+windows_firefox_dir() {
+  # Print the Unix path of %APPDATA%\Mozilla\Firefox when running under WSL.
+  [[ "$WSL" -eq 1 ]] || return 1
+  command -v cmd.exe >/dev/null 2>&1 || return 1
+  command -v wslpath >/dev/null 2>&1 || return 1
+  local raw dir
+  raw="$(cmd.exe /c 'echo %APPDATA%' 2>/dev/null | tr -d '\r\n')" || return 1
+  [[ -n "$raw" ]] || return 1
+  dir="$(wslpath -u "$raw" 2>/dev/null)/Mozilla/Firefox" || return 1
+  [[ -d "$dir" ]] || return 1
+  printf '%s\n' "$dir"
+  return 0
+}
+
+windows_ini_candidates() {
+  local dir
+  dir="$(windows_firefox_dir)" || return 0
+  printf '%s\n' "$dir/profiles.ini" "$dir/installs.ini"
+}
 
 firefox_running() {
   command -v pgrep >/dev/null 2>&1 || return 1
-  for name in firefox firefox-bin org.mozilla.firefox; do
+  for name in firefox firefox-bin firefox-esr org.mozilla.firefox; do
     if pgrep -x "$name" >/dev/null 2>&1; then
       return 0
     fi
   done
+
+  # A Windows Firefox process is not visible in the WSL process tree.
+  if [[ "$WSL" -eq 1 ]] && command -v tasklist.exe >/dev/null 2>&1; then
+    if tasklist.exe 2>/dev/null | grep -qi 'firefox.exe'; then
+      return 0
+    fi
+  fi
   return 1
 }
 
@@ -121,25 +174,40 @@ firefox_installed() {
     [[ -x "$FURR_FIREFOX_BIN" ]] && return 0
     return 1
   fi
+
+  # Under WSL an existing Windows Firefox profile means the browser is
+  # installed on the Windows side: do not install a second copy in Linux.
+  local dir
+  if dir="$(windows_firefox_dir)" \
+    && { [[ -f "$dir/profiles.ini" || -f "$dir/installs.ini" ]]; }; then
+    return 0
+  fi
   firefox_ready
 }
 
 run_as_root() {
   if [[ "$(id -u)" -eq 0 ]]; then
     "$@"
-  else
-    sudo "$@"
+    return
   fi
+  if ! command -v sudo >/dev/null 2>&1; then
+    echo "Error: administrator privileges are required, but sudo is not available." >&2
+    return 1
+  fi
+  sudo "$@"
 }
 
 install_firefox_linux() {
   # Prefer a real browser package over transitional wrappers. Ubuntu/Zorin
-  # ship an apt "firefox" package that only points to Snap.
-  if command -v snap >/dev/null 2>&1; then
+  # ship an apt "firefox" package that only points to Snap. Snap needs
+  # systemd, which is not available in WSL, so skip it there.
+  if [[ "$WSL" -ne 1 ]] && command -v snap >/dev/null 2>&1; then
     run_as_root snap install firefox || true
     firefox_ready && return 0
   fi
   if command -v flatpak >/dev/null 2>&1; then
+    flatpak remote-add --if-not-exists flathub \
+      https://dl.flathub.org/repo/flathub.flatpakrepo || true
     flatpak install -y flathub org.mozilla.firefox || true
     firefox_ready && return 0
   fi
@@ -168,14 +236,18 @@ install_firefox_linux() {
   # The apt package may have installed a small transitional package. Install
   # the real browser from Snap/Flatpak as a fallback.
   echo "Firefox package installed, but the browser is not usable yet. Trying Snap/Flatpak..."
-  if ! command -v snap >/dev/null 2>&1 && command -v apt-get >/dev/null 2>&1; then
-    run_as_root apt-get install -y snapd || true
-  fi
-  if command -v snap >/dev/null 2>&1; then
-    run_as_root snap install firefox || true
-    firefox_ready && return 0
+  if [[ "$WSL" -ne 1 ]]; then
+    if ! command -v snap >/dev/null 2>&1 && command -v apt-get >/dev/null 2>&1; then
+      run_as_root apt-get install -y snapd || true
+    fi
+    if command -v snap >/dev/null 2>&1; then
+      run_as_root snap install firefox || true
+      firefox_ready && return 0
+    fi
   fi
   if command -v flatpak >/dev/null 2>&1; then
+    flatpak remote-add --if-not-exists flathub \
+      https://dl.flathub.org/repo/flathub.flatpakrepo || true
     flatpak install -y flathub org.mozilla.firefox || true
     firefox_ready && return 0
   fi
@@ -187,26 +259,74 @@ install_firefox_macos() {
   command -v curl >/dev/null 2>&1 || return 1
   command -v hdiutil >/dev/null 2>&1 || return 1
 
-  local tmp mount
+  # os=osx is Mozilla's universal DMG: it works on Intel and Apple Silicon.
+  local tmp mount app old_app="" attached=0 ok=0
   tmp="$(mktemp -d)"
   mount="$tmp/mount"
+  app="/Applications/Firefox.app"
   mkdir -p "$mount"
 
-  echo "Downloading Firefox for macOS..."
-  curl -fL --retry 3 \
-    -o "$tmp/firefox.dmg" \
-    'https://download.mozilla.org/?product=firefox-latest-ssl&os=osx&lang=en-US'
+  cleanup() {
+    if [[ "$attached" -eq 1 ]]; then
+      hdiutil detach "$mount" -quiet >/dev/null 2>&1 || true
+    fi
+    rm -rf "$tmp"
+  }
 
-  hdiutil attach "$tmp/firefox.dmg" -mountpoint "$mount" -nobrowse -quiet
-  if [[ -w /Applications ]]; then
-    rm -rf /Applications/Firefox.app
-    cp -R "$mount/Firefox.app" /Applications/Firefox.app
-  else
-    sudo rm -rf /Applications/Firefox.app
-    sudo cp -R "$mount/Firefox.app" /Applications/Firefox.app
+  echo "Downloading Firefox for macOS..."
+  if ! curl -fL --retry 3 --max-time 300 \
+    -o "$tmp/firefox.dmg" \
+    'https://download.mozilla.org/?product=firefox-latest-ssl&os=osx&lang=en-US'; then
+    cleanup
+    return 1
   fi
-  hdiutil detach "$mount" -quiet
-  rm -rf "$tmp"
+
+  if ! hdiutil attach "$tmp/firefox.dmg" -mountpoint "$mount" -nobrowse -quiet; then
+    cleanup
+    return 1
+  fi
+  attached=1
+
+  if [[ ! -d "$mount/Firefox.app" ]]; then
+    cleanup
+    return 1
+  fi
+
+  # Move the old app aside instead of deleting it, so a failed copy can be
+  # rolled back. The temporary backup is discarded only after success.
+  if [[ -e "$app" ]]; then
+    old_app="$tmp/Firefox.app.old"
+    if [[ -w /Applications ]]; then
+      mv "$app" "$old_app" || { cleanup; return 1; }
+    else
+      sudo mv "$app" "$old_app" || { cleanup; return 1; }
+    fi
+  fi
+
+  if [[ -w /Applications ]]; then
+    cp -R "$mount/Firefox.app" "$app" >/dev/null 2>&1 || true
+  else
+    sudo cp -R "$mount/Firefox.app" /Applications/ >/dev/null 2>&1 || true
+  fi
+
+  if [[ -x "$app/Contents/MacOS/firefox" ]]; then
+    ok=1
+  fi
+
+  if [[ "$ok" -eq 0 ]]; then
+    if [[ -n "$old_app" && -e "$old_app" ]]; then
+      if [[ -w /Applications ]]; then
+        mv "$old_app" "$app" >/dev/null 2>&1 || true
+      else
+        sudo mv "$old_app" "$app" >/dev/null 2>&1 || true
+      fi
+    fi
+    cleanup
+    return 1
+  fi
+
+  cleanup
+  return 0
 }
 
 ensure_firefox() {
@@ -253,24 +373,24 @@ ensure_firefox() {
 }
 
 profile_ini_candidates() {
-  # On macOS Firefox keeps profiles.ini and installs.ini one level above the
-  # Profiles folder, exactly like %APPDATA%\Mozilla\Firefox on Windows.
+  # Firefox reads both profiles.ini and installs.ini. A profiles.ini inside
+  # Profiles/ is never used by Firefox: older FurrOS installers wrote one
+  # there, so it is deliberately excluded on every platform.
   printf '%s\n' \
     "$HOME/.mozilla/firefox/profiles.ini" \
+    "$HOME/.mozilla/firefox/installs.ini" \
     "${XDG_CONFIG_HOME:-$HOME/.config}/mozilla/firefox/profiles.ini" \
+    "${XDG_CONFIG_HOME:-$HOME/.config}/mozilla/firefox/installs.ini" \
     "$HOME/.config/mozilla/firefox/profiles.ini" \
+    "$HOME/.config/mozilla/firefox/installs.ini" \
     "$HOME/snap/firefox/common/.mozilla/firefox/profiles.ini" \
+    "$HOME/snap/firefox/common/.mozilla/firefox/installs.ini" \
     "$HOME/.var/app/org.mozilla.firefox/.mozilla/firefox/profiles.ini" \
+    "$HOME/.var/app/org.mozilla.firefox/.mozilla/firefox/installs.ini" \
     "$HOME/Library/Application Support/Firefox/profiles.ini" \
     "$HOME/Library/Application Support/Firefox/installs.ini"
 
-  # A profiles.ini inside Profiles was written by older FurrOS installers.
-  # Ignore it when Firefox's real ini files exist: it describes the ghost
-  # profile created by the first, broken run.
-  if [[ ! -f "$HOME/Library/Application Support/Firefox/profiles.ini" \
-    && ! -f "$HOME/Library/Application Support/Firefox/installs.ini" ]]; then
-    printf '%s\n' "$HOME/Library/Application Support/Firefox/Profiles/profiles.ini"
-  fi
+  windows_ini_candidates
 }
 
 create_firefox_profile() {
@@ -589,11 +709,22 @@ version() {
     || flatpak run org.mozilla.firefox --version 2>/dev/null \
     || snap run firefox --version 2>/dev/null \
     || /Applications/Firefox.app/Contents/MacOS/firefox --version 2>/dev/null \
+    || { [[ "$WSL" -eq 1 ]] && echo "Firefox on Windows (WSL)"; } \
     || echo "version unavailable"
 }
 
 if [[ "$UNINSTALL" -eq 1 ]]; then
-  rm -f "$CHROME/userChrome.css" "$CHROME/userContent.css" "$PROFILE/user.js"
+  REMOVED=()
+  for f in userChrome.css userContent.css; do
+    if [[ -f "$CHROME/$f" ]]; then
+      rm -f "$CHROME/$f"
+      REMOVED+=("$CHROME/$f")
+    fi
+  done
+  if [[ -f "$PROFILE/user.js" ]]; then
+    rm -f "$PROFILE/user.js"
+    REMOVED+=("$PROFILE/user.js")
+  fi
   {
     echo "FurrOS Firefox theme installation report"
     echo "Date:     $(date)"
@@ -604,9 +735,13 @@ if [[ "$UNINSTALL" -eq 1 ]]; then
     echo "Profile:  $PROFILE"
     echo "Firefox:  $(version)"
     echo "Action:   Uninstall"
-    echo "Removed:  $CHROME/userChrome.css"
-    echo "Removed:  $CHROME/userContent.css"
-    echo "Removed:  $PROFILE/user.js"
+    if [[ ${#REMOVED[@]} -eq 0 ]]; then
+      echo "Removed:  nothing (no theme files were present)"
+    else
+      for f in "${REMOVED[@]}"; do
+        echo "Removed:  $f"
+      done
+    fi
   } > "$REPORT"
   echo
   echo "FurrOS theme removed from: $PROFILE"

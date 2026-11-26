@@ -28,7 +28,8 @@ pass "user.js stylesheet preference"
 BIN="$TMP/bin"
 mkdir -p "$BIN"
 printf '#!/bin/sh\nexit 1\n' > "$BIN/pgrep"
-chmod +x "$BIN/pgrep"
+printf '#!/bin/sh\necho "Mozilla Firefox 161.0"\n' > "$BIN/fake-firefox"
+chmod +x "$BIN/pgrep" "$BIN/fake-firefox"
 
 HOME_DIR="$TMP/home"
 BASE="$HOME_DIR/.config/mozilla/firefox"
@@ -59,7 +60,10 @@ Path=q1bvv26u.default
 Default=1
 EOF
 
-PATH="$BIN:$PATH" HOME="$HOME_DIR" "$ROOT/install.sh" > "$TMP/install.out" 2>&1 \
+# FURR_FIREFOX_BIN keeps the tests hermetic on machines without Firefox:
+# no package manager, network access or real profile is touched.
+PATH="$BIN:$PATH" HOME="$HOME_DIR" FURR_FIREFOX_BIN="$BIN/fake-firefox" \
+  "$ROOT/install.sh" > "$TMP/install.out" 2>&1 \
   || { cat "$TMP/install.out" >&2; fail "installer exited with an error"; }
 
 EXPECTED="$(cd "$DEFAULT_PROFILE" && pwd -P)"
@@ -103,7 +107,17 @@ grep -Fq "installs.ini" "$ROOT/install.ps1" \
   || fail "PowerShell installer does not read installs.ini"
 grep -Fq "Join-Path \$firefoxDir 'profiles.ini'" "$ROOT/install.ps1" \
   || fail "PowerShell installer does not read profiles.ini from %APPDATA%\\Mozilla\\Firefox"
-pass "PowerShell installer uses the real Windows profile locations"
+grep -Fq 'Get-StoreFirefoxDir' "$ROOT/install.ps1" \
+  || fail "PowerShell installer ignores Microsoft Store / MSIX profiles"
+grep -Fq 'PROCESSOR_ARCHITECTURE' "$ROOT/install.ps1" \
+  || fail "PowerShell installer does not select the Windows download architecture"
+grep -Fq 'UTF8Encoding' "$ROOT/install.ps1" \
+  || fail "PowerShell installer writes ini files with a legacy encoding"
+grep -Fq '[Install$id]' "$ROOT/install.ps1" \
+  || fail "PowerShell installer does not write the [Install] default"
+grep -Fq 'CompareOrdinal' "$ROOT/install.ps1" \
+  || fail "PowerShell installer tie-break is not deterministic"
+pass "PowerShell installer uses real locations, Store profiles and deterministic selection"
 
 if command -v python3 >/dev/null 2>&1; then
   mkdir -p "$TMP/winroot"
@@ -151,13 +165,68 @@ PY
   pass "Windows profiles.ini + installs.ini point to the real default profile"
 fi
 
+if command -v python3 >/dev/null 2>&1; then
+  STORE_ROOT="$TMP/winstore" PYTHONPATH="$ROOT" python3 -B - <<'PY' || fail "Microsoft Store profile detection failed"
+import os
+from pathlib import Path
+import install
+
+root = Path(os.environ["STORE_ROOT"])
+local = root / "AppData" / "Local"
+store = local / "Packages" / "Mozilla.Firefox_abc" / "LocalCache" / "Roaming" / "Mozilla"
+store.mkdir(parents=True, exist_ok=True)
+os.environ["LOCALAPPDATA"] = str(local)
+os.environ["APPDATA"] = str(root / "AppData" / "Roaming")
+original_system = install.platform.system
+install.platform.system = lambda: "Windows"
+try:
+    chosen_dir = install.windows_store_firefox_dir()
+    assert chosen_dir == store / "Firefox", chosen_dir
+    install.create_firefox_profile()
+    assert (store / "Firefox" / "profiles.ini").is_file(), "Store profiles.ini missing"
+    assert (store / "Firefox" / "installs.ini").is_file(), "Store installs.ini missing"
+    created = list((store / "Firefox" / "Profiles").iterdir())
+    assert len(created) == 1 and created[0].is_dir(), created
+    assert install.choose_profile(None).resolve() == created[0].resolve()
+
+    os.environ["PROCESSOR_ARCHITECTURE"] = "X86"
+    assert "os=win&" in install.firefox_windows_url()
+    os.environ["PROCESSOR_ARCHITECTURE"] = "AMD64"
+    assert "os=win64&" in install.firefox_windows_url()
+    os.environ["PROCESSOR_ARCHITECTURE"] = "ARM64"
+    assert "os=win64&" in install.firefox_windows_url()
+finally:
+    install.platform.system = original_system
+PY
+  pass "Store/MSIX profiles and Windows download architecture are handled"
+fi
+
 if grep -Fq 'Choose the profile number' "$ROOT/install.sh" \
   || grep -Fq 'select label' "$ROOT/install.sh" \
   || grep -Fq 'Choose the profile number' "$ROOT/install.py" \
+  || grep -Fq 'Choose the profile number' "$ROOT/install.ps1" \
+  || grep -Fq 'Read-Host' "$ROOT/install.ps1" \
+  || grep -Eq '^pause[[:space:]]*$' "$ROOT/install.bat" \
+  || grep -Fq 'Press Enter to close' "$ROOT/install.desktop" \
+  || grep -Eq '^read[[:space:]]' "$ROOT/diagnose.sh" \
   || grep -Eq '^[[:space:]]*read[[:space:]]' "$ROOT/install.command"; then
-  fail "an installer still asks the user to choose a profile"
+  fail "an installer or launcher still asks for interactive input"
 fi
-pass "profile selection is fully automatic"
+grep -Fq 'if not "%EXITCODE%"=="0" (' "$ROOT/install.bat" \
+  || fail "the CMD launcher must pause only after a failure"
+grep -Fq 'FURR_INSTALL_DIR' "$ROOT/install.desktop" \
+  || fail "the desktop launcher has no documented directory override"
+pass "profile selection is fully automatic and launchers are non-interactive"
+
+grep -Fq 'wslpath' "$ROOT/install.sh" || fail "install.sh ignores Windows profiles under WSL"
+grep -Fq 'wsl_windows_firefox_dir' "$ROOT/install.py" || fail "install.py ignores Windows profiles under WSL"
+grep -Fq 'interpolation=None' "$ROOT/install.py" \
+  || fail "install.py cannot read ini paths containing a literal percent sign"
+if grep -Fq 'Profiles/profiles.ini' "$ROOT/install.sh" \
+  || grep -Fq 'Profiles/profiles.ini' "$ROOT/install.py"; then
+  fail "an installer still reads the stale profiles.ini inside Profiles/"
+fi
+pass "WSL, percent paths and stale ini files are handled"
 
 # Simulate macOS without touching a real Firefox profile.
 MAC_BIN="$TMP/macbin"

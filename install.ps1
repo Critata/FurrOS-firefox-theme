@@ -14,6 +14,48 @@ $requiredPref = 'user_pref("toolkit.legacyUserProfileCustomizations.stylesheets"
 
 Write-Host 'FurrOS Firefox theme installer - starting...'
 
+function Get-EnvVar {
+  param([string]$Name)
+  return [Environment]::GetEnvironmentVariable($Name)
+}
+
+function Write-Utf8NoBom {
+  param([string]$Path, [string[]]$Lines)
+  $text = ($Lines -join "`r`n") + "`r`n"
+  [IO.File]::WriteAllText($Path, $text, (New-Object System.Text.UTF8Encoding($false)))
+}
+
+function Get-StoreFirefoxDir {
+  # Microsoft Store / MSIX Firefox uses a virtualised APPDATA under Packages.
+  $local = Get-EnvVar 'LOCALAPPDATA'
+  if (-not $local) { return $null }
+  $packages = Join-Path $local 'Packages'
+  if (-not (Test-Path -LiteralPath $packages -PathType Container)) { return $null }
+
+  $relatives = @(
+    'LocalCache\Roaming\Mozilla\Firefox',
+    'LocalCache\Local\Mozilla\Firefox',
+    'LocalState\Mozilla\Firefox'
+  )
+  $apps = @(Get-ChildItem -LiteralPath $packages -Directory -Filter 'Mozilla.Firefox*' -ErrorAction SilentlyContinue)
+  foreach ($app in $apps) {
+    foreach ($relative in $relatives) {
+      $dir = Join-Path $app.FullName $relative
+      if ((Test-Path -LiteralPath (Join-Path $dir 'profiles.ini') -PathType Leaf) -or
+          (Test-Path -LiteralPath (Join-Path $dir 'installs.ini') -PathType Leaf)) {
+        return $dir
+      }
+    }
+  }
+  # A Store Firefox that has never started has no ini yet, but this folder
+  # still exists and is where Firefox will look for its profile.
+  foreach ($app in $apps) {
+    $dir = Join-Path $app.FullName 'LocalCache\Roaming\Mozilla\Firefox'
+    if (Test-Path -LiteralPath (Split-Path -Parent $dir) -PathType Container) { return $dir }
+  }
+  return $null
+}
+
 function Get-Sha256 {
   param([string]$Path)
   return (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant()
@@ -24,14 +66,15 @@ function Test-FirefoxInstalled {
     if (Get-Command $name -ErrorAction SilentlyContinue) { return $true }
   }
 
-  $paths = @(
-    (Join-Path $env:ProgramFiles 'Mozilla Firefox\firefox.exe'),
-    (Join-Path ${env:ProgramFiles(x86)} 'Mozilla Firefox\firefox.exe'),
-    (Join-Path $env:LOCALAPPDATA 'Mozilla Firefox\firefox.exe')
-  )
+  $paths = @()
+  foreach ($variable in @('ProgramW6432', 'ProgramFiles', 'ProgramFiles(x86)', 'LOCALAPPDATA')) {
+    $root = Get-EnvVar $variable
+    if ($root) { $paths += (Join-Path $root 'Mozilla Firefox\firefox.exe') }
+  }
   foreach ($path in $paths) {
     if ($path -and (Test-Path -LiteralPath $path -PathType Leaf)) { return $true }
   }
+  if (Get-StoreFirefoxDir) { return $true }
 
   $roots = @(
     'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*',
@@ -47,23 +90,36 @@ function Test-FirefoxInstalled {
 }
 
 function Install-Firefox {
-  if (Get-Command winget -ErrorAction SilentlyContinue) {
-    winget install --id Mozilla.Firefox -e --accept-source-agreements --accept-package-agreements --silent
-    return
-  }
-  if (Get-Command choco -ErrorAction SilentlyContinue) {
-    choco install firefox -y
-    return
-  }
-  if (Get-Command scoop -ErrorAction SilentlyContinue) {
-    scoop install firefox
-    return
+  # Try every available manager: a broken winget must not block Chocolatey
+  # or the direct Mozilla download.
+  $managers = @(
+    [pscustomobject]@{
+      Name = 'winget'
+      Args = @('install', '--id', 'Mozilla.Firefox', '-e', '--accept-source-agreements', '--accept-package-agreements', '--silent')
+    },
+    [pscustomobject]@{ Name = 'choco'; Args = @('install', 'firefox', '-y') },
+    [pscustomobject]@{ Name = 'scoop'; Args = @('install', 'firefox') }
+  )
+  foreach ($manager in $managers) {
+    if (-not (Get-Command $manager.Name -ErrorAction SilentlyContinue)) { continue }
+    try {
+      $managerArgs = @($manager.Args)
+      & $manager.Name @managerArgs
+    } catch {
+      continue
+    }
+    if (Test-FirefoxInstalled) { return }
   }
 
-  $url = 'https://download.mozilla.org/?product=firefox-latest-ssl&os=win64&lang=en-US'
+  # Mozilla serves os=win (32-bit) and os=win64 (64-bit, emulated on ARM64).
+  # ARM64 does not have a separate stable URL, so win64 is intentional.
+  $arch = Get-EnvVar 'PROCESSOR_ARCHITECTURE'
+  if (-not $arch) { $arch = Get-EnvVar 'PROCESSOR_ARCHITEW6432' }
+  $os = if ($arch -eq 'X86') { 'win' } else { 'win64' }
+  $url = "https://download.mozilla.org/?product=firefox-latest-ssl&os=$os&lang=en-US"
   $out = Join-Path $env:TEMP 'FirefoxSetup.exe'
-  Write-Host 'Downloading Firefox for Windows...'
-  Invoke-WebRequest -Uri $url -OutFile $out -UseBasicParsing
+  Write-Host "Downloading Firefox for Windows ($os)..."
+  Invoke-WebRequest -Uri $url -OutFile $out -UseBasicParsing -TimeoutSec 300
   Start-Process -FilePath $out -ArgumentList '/S' -Wait
 }
 
@@ -83,15 +139,18 @@ function Ensure-Firefox {
     throw "Error: could not install Firefox automatically. $($_.Exception.Message)"
   }
 
+  # Refresh PATH from the machine and user values, but keep the inherited
+  # entries and the ones added by winget/choco/scoop in this session.
   $machinePath = [Environment]::GetEnvironmentVariable('Path', 'Machine')
   $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
-  if ($machinePath -and $userPath) {
-    $env:Path = "$machinePath;$userPath"
-  } elseif ($machinePath) {
-    $env:Path = $machinePath
-  } elseif ($userPath) {
-    $env:Path = $userPath
+  $entries = @($env:Path -split ';') + @(($userPath -split ';') + ($machinePath -split ';'))
+  $seen = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+  $newPath = @()
+  foreach ($entry in $entries) {
+    if ([string]::IsNullOrWhiteSpace($entry)) { continue }
+    if ($seen.Add($entry)) { $newPath += $entry }
   }
+  $env:Path = $newPath -join ';'
 
   if (-not (Test-FirefoxInstalled)) {
     throw 'Error: Firefox was installed but could not be detected. Start Firefox once, then run this installer again.'
@@ -101,31 +160,42 @@ function Ensure-Firefox {
 
 function Initialize-FirefoxProfile {
   # Never create a second profile: Firefox may already use one in another
-  # standard location.
+  # standard location (including the Store/MSIX sandbox).
   foreach ($ini in (Get-IniCandidates)) {
     if (Select-String -LiteralPath $ini -Pattern '^\[Profile' -Quiet) { return }
   }
 
-  $appData = $env:APPDATA
-  if (-not $appData) { $appData = Join-Path $env:USERPROFILE 'AppData\Roaming' }
-  $firefoxDir = Join-Path $appData 'Mozilla\Firefox'
+  $storeDir = Get-StoreFirefoxDir
+  if ($storeDir) {
+    $firefoxDir = $storeDir
+  } else {
+    $appData = Get-EnvVar 'APPDATA'
+    if (-not $appData) { $appData = Join-Path $env:USERPROFILE 'AppData\Roaming' }
+    $firefoxDir = Join-Path $appData 'Mozilla\Firefox'
+  }
   $profilesDir = Join-Path $firefoxDir 'Profiles'
   $profilesIni = Join-Path $firefoxDir 'profiles.ini'
   $installsIni = Join-Path $firefoxDir 'installs.ini'
 
-  New-Item -ItemType Directory -Path $profilesDir -Force | Out-Null
+  [IO.Directory]::CreateDirectory($profilesDir) | Out-Null
   $id = -join (1..8 | ForEach-Object {
     $index = Get-Random -Minimum 0 -Maximum 36
     '0123456789abcdefghijklmnopqrstuvwxyz'[$index]
   })
   $dir = "$id.default-release"
   $relative = "Profiles/$dir"
-  New-Item -ItemType Directory -Path (Join-Path $profilesDir $dir) -Force | Out-Null
+  [IO.Directory]::CreateDirectory((Join-Path $profilesDir $dir)) | Out-Null
 
+  # Firefox 62+ uses [Install] from profiles.ini or installs.ini. Write both
+  # sections so a first run works without launching Firefox twice.
   $profileLines = @(
     '[General]',
     'StartWithLastProfile=1',
     'Version=2',
+    '',
+    "[Install$id]",
+    "Default=$relative",
+    'Locked=1',
     '',
     '[Profile0]',
     'Name=default-release',
@@ -134,15 +204,14 @@ function Initialize-FirefoxProfile {
     'Default=1',
     ''
   )
-  Set-Content -LiteralPath $profilesIni -Value $profileLines -Encoding ASCII
-
   $installLines = @(
     "[Install$id]",
     "Default=$relative",
     'Locked=1',
     ''
   )
-  Set-Content -LiteralPath $installsIni -Value $installLines -Encoding ASCII
+  Write-Utf8NoBom -Path $profilesIni -Lines $profileLines
+  Write-Utf8NoBom -Path $installsIni -Lines $installLines
   Write-Host "Created Firefox profile: $(Join-Path $profilesDir $dir)"
 }
 
@@ -159,16 +228,21 @@ function Get-IniCandidates {
   # is what Firefox 62+ uses to remember the default profile.
   $raw = @()
   foreach ($variable in @('APPDATA', 'LOCALAPPDATA')) {
-    $value = [Environment]::GetEnvironmentVariable($variable)
+    $value = Get-EnvVar $variable
     if (-not $value) { continue }
     $firefoxDir = Join-Path $value 'Mozilla\Firefox'
     $raw += (Join-Path $firefoxDir 'profiles.ini')
     $raw += (Join-Path $firefoxDir 'installs.ini')
-    $raw += (Join-Path $firefoxDir 'Profiles\profiles.ini')
   }
 
-  # Microsoft Store / MSIX Firefox stores its profile under Packages.
-  $local = [Environment]::GetEnvironmentVariable('LOCALAPPDATA')
+  # Firefox never reads a profiles.ini inside Profiles/. Older FurrOS
+  # installers wrote one there; it must be ignored on every platform.
+  $storeDir = Get-StoreFirefoxDir
+  if ($storeDir) {
+    $raw += (Join-Path $storeDir 'profiles.ini')
+    $raw += (Join-Path $storeDir 'installs.ini')
+  }
+  $local = Get-EnvVar 'LOCALAPPDATA'
   if ($local) {
     $packages = Join-Path $local 'Packages'
     if (Test-Path -LiteralPath $packages -PathType Container) {
@@ -179,9 +253,9 @@ function Get-IniCandidates {
           'LocalCache\Local\Mozilla\Firefox',
           'LocalState\Mozilla\Firefox'
         )) {
-          $storeDir = Join-Path $app.FullName $relative
-          $raw += (Join-Path $storeDir 'profiles.ini')
-          $raw += (Join-Path $storeDir 'installs.ini')
+          $dir = Join-Path $app.FullName $relative
+          $raw += (Join-Path $dir 'profiles.ini')
+          $raw += (Join-Path $dir 'installs.ini')
         }
       }
     }
@@ -274,8 +348,17 @@ function ConvertTo-ProfileObject {
 
   $legacyDefault = $false
   if ($Data.ContainsKey('Default') -and $Data['Default'] -eq '1') { $legacyDefault = $true }
+  $initialized = (Test-Path -LiteralPath (Join-Path $path 'prefs.js') -PathType Leaf) -or
+    (Test-Path -LiteralPath (Join-Path $path 'user.js') -PathType Leaf)
+  $preferred = $path -like '*.default-release'
 
-  return [pscustomobject]@{ Name = $name; Path = $path; LegacyDefault = $legacyDefault }
+  return [pscustomobject]@{
+    Name = $name
+    Path = $path
+    LegacyDefault = $legacyDefault
+    Initialized = [bool]$initialized
+    Preferred = [bool]$preferred
+  }
 }
 
 function Read-Profiles {
@@ -343,43 +426,31 @@ function Choose-Profile {
     throw "Error: Firefox profile not found.`nSpecify it with: powershell -File install.ps1 -Profile 'C:\path\to\profile'"
   }
 
-  $all = $all | Sort-Object -Property @{ Expression = { $_.Score } } -Descending
-  if ($all.Count -eq 1) { return $all[0].Path }
-
-  $topScore = $all[0].Score
-  $top = @()
-  $rest = @()
+  # Automatic, deterministic tie-break, identical to install.sh/install.py:
+  # score, initialized profile, .default-release, then ordinal path. Never
+  # prompt, even when several profiles share the same score.
+  $best = $null
   foreach ($item in $all) {
-    if ($item.Score -eq $topScore) { $top += $item } else { $rest += $item }
+    if (-not $best) { $best = $item; continue }
+    if ($item.Score -gt $best.Score) { $best = $item; continue }
+    if ($item.Score -lt $best.Score) { continue }
+    if ($item.Initialized -and -not $best.Initialized) { $best = $item; continue }
+    if (-not $item.Initialized -and $best.Initialized) { continue }
+    if ($item.Preferred -and -not $best.Preferred) { $best = $item; continue }
+    if (-not $item.Preferred -and $best.Preferred) { continue }
+    if ([string]::CompareOrdinal($item.Path, $best.Path) -lt 0) { $best = $item }
   }
-  if ($top.Count -eq 1) {
-    Write-Host "Selected profile: $($top[0].Path)"
-    return $top[0].Path
-  }
-
-  $choices = @($top) + @($rest)
-  Write-Host ''
-  Write-Host 'Multiple Firefox profiles found:'
-  for ($i = 0; $i -lt $choices.Count; $i++) {
-    $marker = ''
-    switch ($choices[$i].Score) {
-      3 { $marker = ' (default)' }
-      2 { $marker = ' (legacy default)' }
-    }
-    Write-Host ('  {0}. {1}{2} - {3}' -f ($i + 1), $choices[$i].Name, $marker, $choices[$i].Path)
-  }
-  while ($true) {
-    $answer = Read-Host 'Choose the profile number'
-    $number = 0
-    if ([int]::TryParse($answer, [ref]$number) -and $number -ge 1 -and $number -le $choices.Count) {
-      return $choices[$number - 1].Path
-    }
-    Write-Host 'Invalid choice.'
-  }
+  Write-Host "Selected profile: $($best.Path)"
+  return $best.Path
 }
 
 function Write-InstallReport {
-  param([string]$ProfilePath, [hashtable]$Targets, [bool]$Removed, [string]$BackupStamp)
+  param(
+    [string]$ProfilePath,
+    [hashtable]$Targets,
+    [bool]$Removed,
+    [string[]]$Paths = @()
+  )
   $lines = @(
     'FurrOS Firefox theme installation report',
     ('Date:     {0}' -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss')),
@@ -391,12 +462,22 @@ function Write-InstallReport {
   )
   if ($Removed) {
     $lines += 'Action:   Uninstall'
-    foreach ($target in $Targets.Values) {
-      $lines += ('Removed:  {0}' -f $target)
+    if ($Paths.Count -eq 0) {
+      $lines += 'Removed:  nothing (no theme files were present)'
+    } else {
+      foreach ($path in $Paths) {
+        $lines += ('Removed:  {0}' -f $path)
+      }
     }
   } else {
-    $lines += ('Backup:   .bak-{0}' -f $BackupStamp)
     $lines += 'Action:   Install'
+    if ($Paths.Count -eq 0) {
+      $lines += 'Backup:   none (no previous files)'
+    } else {
+      foreach ($path in $Paths) {
+        $lines += ('Backup:   {0}' -f $path)
+      }
+    }
     foreach ($key in $themeFiles) {
       $lines += ('Verified: {0} -> {1}' -f $key, $Targets[$key])
     }
@@ -424,7 +505,8 @@ try {
 
   $profilePath = Choose-Profile -Specified $Profile
   $chrome = Join-Path $profilePath 'chrome'
-  New-Item -ItemType Directory -Path $chrome -Force | Out-Null
+  # IO.Directory handles paths containing [ ] literally, unlike New-Item -Path.
+  [IO.Directory]::CreateDirectory($chrome) | Out-Null
 
   $targets = @{
     'userChrome.css'  = Join-Path $chrome 'userChrome.css'
@@ -433,21 +515,26 @@ try {
   }
 
   if ($Uninstall) {
+    $removedPaths = @()
     foreach ($file in $themeFiles) {
       if (Test-Path -LiteralPath $targets[$file] -PathType Leaf) {
         Remove-Item -LiteralPath $targets[$file] -Force
+        $removedPaths += $targets[$file]
       }
     }
-    Write-InstallReport -ProfilePath $profilePath -Targets $targets -Removed $true -BackupStamp $stamp
+    Write-InstallReport -ProfilePath $profilePath -Targets $targets -Removed $true -Paths $removedPaths
     Write-Host ''
     Write-Host "FurrOS theme removed from: $profilePath"
     Write-Host "Report saved: $report"
     Write-Host 'Start Firefox again to apply the change.'
   } else {
+    $backupPaths = @()
     foreach ($file in $themeFiles) {
       $target = $targets[$file]
       if (Test-Path -LiteralPath $target -PathType Leaf) {
-        Copy-Item -LiteralPath $target -Destination ($target + '.bak-' + $stamp) -Force
+        $backup = $target + '.bak-' + $stamp
+        Copy-Item -LiteralPath $target -Destination $backup -Force
+        $backupPaths += $backup
       }
     }
 
@@ -464,7 +551,7 @@ try {
       throw 'Error: user.js is missing the required stylesheet preference.'
     }
 
-    Write-InstallReport -ProfilePath $profilePath -Targets $targets -Removed $false -BackupStamp $stamp
+    Write-InstallReport -ProfilePath $profilePath -Targets $targets -Removed $false -Paths $backupPaths
     Write-Host ''
     Write-Host "FurrOS theme installed in: $profilePath"
     Write-Host "Previous files backed up with suffix .bak-$stamp"

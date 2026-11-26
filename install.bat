@@ -7,7 +7,6 @@ set EXITCODE=%ERRORLEVEL%
 if not "%EXITCODE%"=="0" (
   echo.
   echo INSTALL FAILED ^(exit %EXITCODE%^).
+  pause
 )
-echo.
-pause
 exit /b %EXITCODE%

@@ -7,3 +7,4 @@
 *.js text eol=lf
 *.md text eol=lf
 *.py text eol=lf
+*.png binary

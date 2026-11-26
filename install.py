@@ -34,29 +34,108 @@ def sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def is_wsl() -> bool:
+    """True when Python runs inside Windows Subsystem for Linux."""
+    if platform.system() != "Linux":
+        return False
+    if "microsoft" in platform.release().lower() or "wsl" in platform.release().lower():
+        return True
+    try:
+        return "microsoft" in Path("/proc/version").read_text(
+            encoding="utf-8", errors="ignore"
+        ).lower()
+    except OSError:
+        return False
+
+
+def wsl_windows_firefox_dir() -> Path | None:
+    """Return %APPDATA%\\Mozilla\\Firefox as a WSL path, when available."""
+    if not is_wsl() or not shutil.which("cmd.exe") or not shutil.which("wslpath"):
+        return None
+    try:
+        raw = subprocess.check_output(
+            ["cmd.exe", "/c", "echo %APPDATA%"],
+            text=True,
+            errors="ignore",
+            timeout=10,
+        ).strip().strip("\r\n")
+        if not raw:
+            return None
+        unix = subprocess.check_output(
+            ["wslpath", "-u", raw], text=True, errors="ignore", timeout=10
+        ).strip()
+        if not unix:
+            return None
+        firefox_dir = Path(unix) / "Mozilla" / "Firefox"
+        return firefox_dir if firefox_dir.is_dir() else None
+    except Exception:
+        return None
+
+
+def windows_store_firefox_dir() -> Path | None:
+    """Return the Firefox profile folder of a Microsoft Store / MSIX install."""
+    if platform.system() != "Windows":
+        return None
+    local = os.environ.get("LOCALAPPDATA")
+    if not local:
+        return None
+    packages = Path(local) / "Packages"
+    if not packages.is_dir():
+        return None
+    relatives = (
+        "LocalCache/Roaming/Mozilla/Firefox",
+        "LocalCache/Local/Mozilla/Firefox",
+        "LocalState/Mozilla/Firefox",
+    )
+    for app in packages.glob("Mozilla.Firefox*"):
+        for relative in relatives:
+            firefox_dir = app / relative
+            if (firefox_dir / "profiles.ini").is_file() or (
+                firefox_dir / "installs.ini"
+            ).is_file():
+                return firefox_dir
+    # A Store Firefox that has never started has no ini yet, but the
+    # LocalCache\Roaming folder still exists and is where Firefox will look.
+    for app in packages.glob("Mozilla.Firefox*"):
+        candidate = app / "LocalCache" / "Roaming" / "Mozilla" / "Firefox"
+        if candidate.parent.is_dir():
+            return candidate
+    return None
+
+
 def firefox_running() -> bool:
     system = platform.system()
-    try:
-        if system == "Windows":
+    if system == "Windows":
+        try:
             output = subprocess.check_output(
                 ["tasklist"], text=True, errors="ignore", timeout=10
             )
-            return "firefox.exe" in output.lower()
-
-        # Match process names only. Matching full command lines would also
-        # match this installer when its path contains "firefox".
-        for name in ("firefox", "firefox-bin", "org.mozilla.firefox"):
-            try:
-                output = subprocess.check_output(
-                    ["pgrep", "-x", name], text=True, errors="ignore", timeout=10
-                )
-            except subprocess.CalledProcessError:
-                continue
-            if output.strip():
+            if "firefox.exe" in output.lower():
                 return True
-        return False
-    except Exception:
-        return False
+        except Exception:
+            pass
+    elif is_wsl():
+        try:
+            output = subprocess.check_output(
+                ["tasklist.exe"], text=True, errors="ignore", timeout=10
+            )
+            if "firefox.exe" in output.lower():
+                return True
+        except Exception:
+            pass
+
+    # Match process names only. Matching full command lines would also match
+    # this installer when its path contains "firefox".
+    for name in ("firefox", "firefox-bin", "firefox-esr", "org.mozilla.firefox"):
+        try:
+            output = subprocess.check_output(
+                ["pgrep", "-x", name], text=True, errors="ignore", timeout=10
+            )
+        except Exception:
+            continue
+        if output.strip():
+            return True
+    return False
 
 
 def command_works(command: list[str]) -> bool:
@@ -86,14 +165,21 @@ def firefox_ready() -> bool:
 
     if system == "Windows":
         roots = (
+            os.environ.get("ProgramW6432"),
             os.environ.get("ProgramFiles", r"C:\Program Files"),
             os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)"),
             os.environ.get("LOCALAPPDATA", str(Path.home() / "AppData" / "Local")),
         )
         for root in roots:
+            if not root:
+                continue
             binary = Path(root) / "Mozilla" / "Firefox" / "firefox.exe"
             if binary.is_file() and command_works([str(binary)]):
                 return True
+
+        # Microsoft Store / MSIX Firefox keeps its profile under Packages.
+        if windows_store_firefox_dir() is not None:
+            return True
         return False
 
     for candidate in (
@@ -125,6 +211,15 @@ def firefox_installed() -> bool:
     override = os.environ.get("FURR_FIREFOX_BIN")
     if override:
         return Path(override).is_file() and os.access(override, os.X_OK)
+
+    # Under WSL an existing Windows Firefox profile means the browser is
+    # already installed on the Windows side: no need for a Linux copy.
+    windows_dir = wsl_windows_firefox_dir()
+    if windows_dir is not None and (
+        (windows_dir / "profiles.ini").is_file()
+        or (windows_dir / "installs.ini").is_file()
+    ):
+        return True
     return firefox_ready()
 
 
@@ -146,13 +241,23 @@ def install_firefox_linux() -> None:
         return firefox_ready()
 
     # Prefer a real browser package over Ubuntu/Zorin's transitional apt
-    # wrapper that only points to Snap.
-    if shutil.which("snap") and attempt(["snap", "install", "firefox"], True):
-        return
-    if shutil.which("flatpak") and attempt(
-        ["flatpak", "install", "-y", "flathub", "org.mozilla.firefox"]
+    # wrapper that only points to Snap. Snap needs systemd, absent in WSL.
+    if not is_wsl() and shutil.which("snap") and attempt(
+        ["snap", "install", "firefox"], True
     ):
         return
+    if shutil.which("flatpak"):
+        attempt(
+            [
+                "flatpak",
+                "remote-add",
+                "--if-not-exists",
+                "flathub",
+                "https://dl.flathub.org/repo/flathub.flatpakrepo",
+            ]
+        )
+        if attempt(["flatpak", "install", "-y", "flathub", "org.mozilla.firefox"]):
+            return
 
     managers = (
         ("apt-get", (["apt-get", "update"], ["apt-get", "install", "-y", "firefox"])),
@@ -163,85 +268,147 @@ def install_firefox_linux() -> None:
         ("apk", (["apk", "add", "firefox"],)),
         ("xbps-install", (["xbps-install", "-Sy", "firefox"],)),
     )
+    # Try every available manager; a broken apt/dnf must not hide a working
+    # alternative.
     for name, commands in managers:
-        if shutil.which(name):
-            for command in commands:
-                attempt(command, True)
-            break
+        if not shutil.which(name):
+            continue
+        for command in commands:
+            attempt(command, True)
 
     if firefox_ready():
         return
 
     print("Firefox package installed, but the browser is not usable yet. Trying Snap/Flatpak...")
-    if not shutil.which("snap") and shutil.which("apt-get"):
-        attempt(["apt-get", "install", "-y", "snapd"], True)
-    if shutil.which("snap") and attempt(["snap", "install", "firefox"], True):
-        return
-    if shutil.which("flatpak") and attempt(
-        ["flatpak", "install", "-y", "flathub", "org.mozilla.firefox"]
-    ):
-        return
+    if not is_wsl():
+        if not shutil.which("snap") and shutil.which("apt-get"):
+            attempt(["apt-get", "install", "-y", "snapd"], True)
+        if shutil.which("snap") and attempt(["snap", "install", "firefox"], True):
+            return
+    if shutil.which("flatpak"):
+        attempt(
+            [
+                "flatpak",
+                "remote-add",
+                "--if-not-exists",
+                "flathub",
+                "https://dl.flathub.org/repo/flathub.flatpakrepo",
+            ]
+        )
+        if attempt(["flatpak", "install", "-y", "flathub", "org.mozilla.firefox"]):
+            return
 
     raise RuntimeError("Firefox package did not provide a usable browser")
 
 
 def install_firefox_macos() -> None:
+    # os=osx is Mozilla's universal DMG: valid on Intel and Apple Silicon.
     url = "https://download.mozilla.org/?product=firefox-latest-ssl&os=osx&lang=en-US"
     temp = Path(tempfile.mkdtemp(prefix="furros-firefox-"))
     dmg = temp / "firefox.dmg"
     mount = temp / "mount"
     mount.mkdir()
+    app = Path("/Applications/Firefox.app")
+    old_app = temp / "Firefox.app.old"
+    attached = False
     print("Downloading Firefox for macOS...")
 
-    urllib.request.urlretrieve(url, dmg)
-    subprocess.run(
-        ["hdiutil", "attach", str(dmg), "-mountpoint", str(mount), "-nobrowse", "-quiet"],
-        check=True,
-    )
+    def detach_and_clean() -> None:
+        if attached:
+            subprocess.run(
+                ["hdiutil", "detach", str(mount), "-quiet"], check=False
+            )
+        shutil.rmtree(temp, ignore_errors=True)
+
     try:
-        app = Path("/Applications/Firefox.app")
+        with urllib.request.urlopen(url, timeout=300) as response, dmg.open("wb") as out:
+            shutil.copyfileobj(response, out)
+        subprocess.run(
+            ["hdiutil", "attach", str(dmg), "-mountpoint", str(mount), "-nobrowse", "-quiet"],
+            check=True,
+        )
+        attached = True
+        if not (mount / "Firefox.app").is_dir():
+            raise RuntimeError("Firefox.app is missing from the downloaded DMG")
+
+        # Move the old app aside instead of deleting it, so we can roll back
+        # if the copy fails. It is discarded only after a successful install.
         if app.exists():
-            shutil.rmtree(app)
+            if os.access("/Applications", os.W_OK):
+                shutil.move(str(app), str(old_app))
+            else:
+                subprocess.run(["sudo", "mv", str(app), str(old_app)], check=True)
+
         try:
-            shutil.copytree(mount / "Firefox.app", app)
+            if os.access("/Applications", os.W_OK):
+                shutil.copytree(mount / "Firefox.app", app)
+            else:
+                raise PermissionError("/Applications is not writable")
         except PermissionError:
             subprocess.run(
                 ["sudo", "cp", "-R", str(mount / "Firefox.app"), "/Applications/"],
                 check=True,
             )
-    finally:
-        subprocess.run(["hdiutil", "detach", str(mount), "-quiet"], check=False)
-        shutil.rmtree(temp, ignore_errors=True)
+
+        if not (app / "Contents" / "MacOS" / "firefox").is_file():
+            raise RuntimeError("Firefox was copied but the browser binary is missing")
+    except Exception:
+        if old_app.exists():
+            try:
+                if os.access("/Applications", os.W_OK):
+                    if app.exists():
+                        shutil.rmtree(app)
+                    shutil.move(str(old_app), str(app))
+                else:
+                    subprocess.run(["sudo", "mv", str(old_app), str(app)], check=True)
+            except Exception:
+                pass
+        detach_and_clean()
+        raise
+    detach_and_clean()
+
+
+def firefox_windows_url() -> str:
+    # PROCESSOR_ARCHITECTURE is X86 for 32-bit Windows, AMD64 or ARM64
+    # otherwise. Mozilla provides os=win (32-bit) and os=win64 (64-bit,
+    # emulated on ARM64); os=osx-arm64 does not exist.
+    arch = os.environ.get("PROCESSOR_ARCHITECTURE", "").upper()
+    os_name = "win" if arch == "X86" else "win64"
+    return (
+        "https://download.mozilla.org/?product=firefox-latest-ssl"
+        f"&os={os_name}&lang=en-US"
+    )
 
 
 def install_firefox_windows() -> None:
+    attempts: list[list[str]] = []
     if shutil.which("winget"):
-        subprocess.run(
+        attempts.append(
             [
-                "winget",
-                "install",
-                "--id",
-                "Mozilla.Firefox",
-                "-e",
-                "--accept-source-agreements",
-                "--accept-package-agreements",
-                "--silent",
-            ],
-            check=True,
+                "winget", "install", "--id", "Mozilla.Firefox", "-e",
+                "--accept-source-agreements", "--accept-package-agreements", "--silent",
+            ]
         )
-        return
     if shutil.which("choco"):
-        subprocess.run(["choco", "install", "firefox", "-y"], check=True)
-        return
+        attempts.append(["choco", "install", "firefox", "-y"])
     if shutil.which("scoop"):
-        subprocess.run(["scoop", "install", "firefox"], check=True)
-        return
+        attempts.append(["scoop", "install", "firefox"])
 
-    url = "https://download.mozilla.org/?product=firefox-latest-ssl&os=win64&lang=en-US"
+    # Try every available manager: a broken winget must not block Chocolatey
+    # or the direct download.
+    for command in attempts:
+        try:
+            subprocess.run(command, check=True)
+        except Exception:
+            continue
+        if firefox_installed():
+            return
+
     temp_dir = Path(os.environ.get("TEMP", str(Path.home() / "AppData" / "Local" / "Temp")))
     installer = temp_dir / "FirefoxSetup.exe"
     print("Downloading Firefox for Windows...")
-    urllib.request.urlretrieve(url, installer)
+    with urllib.request.urlopen(firefox_windows_url(), timeout=300) as response, installer.open("wb") as out:
+        shutil.copyfileobj(response, out)
     subprocess.run([str(installer), "/S"], check=True)
 
 
@@ -292,8 +459,10 @@ def create_firefox_profile() -> None:
     system = platform.system()
     installs_ini: Path | None = None
     if system == "Windows":
+        # A Store/MSIX Firefox uses a virtualised APPDATA under Packages.
+        store_dir = windows_store_firefox_dir()
         appdata = os.environ.get("APPDATA", str(Path.home() / "AppData" / "Roaming"))
-        firefox_dir = Path(appdata) / "Mozilla" / "Firefox"
+        firefox_dir = store_dir or (Path(appdata) / "Mozilla" / "Firefox")
         base = firefox_dir / "Profiles"
         ini = firefox_dir / "profiles.ini"
         installs_ini = firefox_dir / "installs.ini"
@@ -375,11 +544,9 @@ def candidate_ini_files() -> list[Path]:
             if not value:
                 continue
             firefox_dir = Path(value) / "Mozilla" / "Firefox"
-            raw += [
-                firefox_dir / "profiles.ini",
-                firefox_dir / "installs.ini",
-                firefox_dir / "Profiles" / "profiles.ini",
-            ]
+            # Firefox never reads profiles.ini from inside Profiles/. Old
+            # FurrOS installers wrote one there; it must be ignored.
+            raw += [firefox_dir / "profiles.ini", firefox_dir / "installs.ini"]
 
         local = os.environ.get("LOCALAPPDATA")
         if local:
@@ -404,30 +571,22 @@ def candidate_ini_files() -> list[Path]:
         # on Windows. Both are needed to find the real default profile.
         firefox_dir = home / "Library" / "Application Support" / "Firefox"
         raw += [firefox_dir / "profiles.ini", firefox_dir / "installs.ini"]
-        # A profiles.ini inside Profiles was written by older FurrOS
-        # installers. Ignore it when Firefox's real ini files exist.
-        if not (firefox_dir / "profiles.ini").is_file() and not (
-            firefox_dir / "installs.ini"
-        ).is_file():
-            raw.append(firefox_dir / "Profiles" / "profiles.ini")
     else:
         config_home = os.environ.get("XDG_CONFIG_HOME") or str(home / ".config")
-        raw += [
-            home / ".mozilla" / "firefox" / "profiles.ini",
-            Path(config_home) / "mozilla" / "firefox" / "profiles.ini",
-            home / ".config" / "mozilla" / "firefox" / "profiles.ini",
-            home / "snap" / "firefox" / "common" / ".mozilla" / "firefox" / "profiles.ini",
-            home / ".var" / "app" / "org.mozilla.firefox" / ".mozilla" / "firefox" / "profiles.ini",
-        ]
+        for base in (
+            home / ".mozilla" / "firefox",
+            Path(config_home) / "mozilla" / "firefox",
+            home / ".config" / "mozilla" / "firefox",
+            home / "snap" / "firefox" / "common" / ".mozilla" / "firefox",
+            home / ".var" / "app" / "org.mozilla.firefox" / ".mozilla" / "firefox",
+        ):
+            raw += [base / "profiles.ini", base / "installs.ini"]
 
-    # Unusual installs may still use the generic Linux/macOS locations.
-    # Do not add these on Windows: they would mix Linux profiles into the
-    # Windows profile list and could make the installer choose the wrong one.
-    if platform.system() != "Windows":
-        raw += [
-            home / ".mozilla" / "firefox" / "profiles.ini",
-            home / ".config" / "mozilla" / "firefox" / "profiles.ini",
-        ]
+    # Under WSL, Firefox may be the Windows one. Read its ini files through
+    # Windows interop; Linux candidates are listed first and win ties.
+    windows_dir = wsl_windows_firefox_dir()
+    if windows_dir is not None:
+        raw += [windows_dir / "profiles.ini", windows_dir / "installs.ini"]
 
     seen: set[Path] = set()
     result: list[Path] = []
@@ -473,7 +632,7 @@ def active_profile() -> Path | None:
 
 def read_install_defaults(ini: Path) -> set[Path]:
     """Read [Install...] Default entries from profiles.ini or installs.ini."""
-    parser = configparser.ConfigParser(strict=False)
+    parser = configparser.ConfigParser(strict=False, interpolation=None)
     parser.read(ini)
     base = ini.parent
 
@@ -495,7 +654,7 @@ def read_install_defaults(ini: Path) -> set[Path]:
 
 
 def read_profiles(ini: Path) -> list[dict[str, object]]:
-    parser = configparser.ConfigParser(strict=False)
+    parser = configparser.ConfigParser(strict=False, interpolation=None)
     parser.read(ini)
     base = ini.parent
 
@@ -700,6 +859,16 @@ def main() -> None:
 
     print("FurrOS Firefox theme installer — starting...")
 
+    # sudo/root changes HOME; without this warning the profile would be the
+    # root user's, not the desktop user's.
+    home = str(Path.home())
+    if hasattr(os, "geteuid") and os.geteuid() == 0 and home in ("/root", "/var/root"):
+        print(
+            f"Warning: running as root targets {home}. Run as the desktop user instead\n"
+            "unless you intentionally want to change root's Firefox profile.",
+            file=sys.stderr,
+        )
+
     if not args.uninstall:
         ensure_firefox(args.skip_firefox_install)
         create_firefox_profile()
@@ -754,9 +923,5 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    try:
-        main()
-    except SystemExit as exc:
-        if str(exc):
-            print(str(exc), file=sys.stderr)
-        raise
+    # SystemExit messages are printed once by the interpreter itself.
+    main()
