@@ -175,7 +175,6 @@ function Initialize-FirefoxProfile {
   }
   $profilesDir = Join-Path $firefoxDir 'Profiles'
   $profilesIni = Join-Path $firefoxDir 'profiles.ini'
-  $installsIni = Join-Path $firefoxDir 'installs.ini'
 
   [IO.Directory]::CreateDirectory($profilesDir) | Out-Null
   $id = -join (1..8 | ForEach-Object {
@@ -186,16 +185,15 @@ function Initialize-FirefoxProfile {
   $relative = "Profiles/$dir"
   [IO.Directory]::CreateDirectory((Join-Path $profilesDir $dir)) | Out-Null
 
-  # Firefox 62+ uses [Install] from profiles.ini or installs.ini. Write both
-  # sections so a first run works without launching Firefox twice.
+  # Do not invent an [Install<hash>] section here. Firefox derives the hash
+  # from its own installation directory and creates installs.ini on first
+  # start; a fake hash is ignored (or, worse, migrated by Firefox and later
+  # mistaken for a real default). The legacy [Profile] Default=1 flag is
+  # enough to make Firefox pick this profile on first start.
   $profileLines = @(
     '[General]',
     'StartWithLastProfile=1',
     'Version=2',
-    '',
-    "[Install$id]",
-    "Default=$relative",
-    'Locked=1',
     '',
     '[Profile0]',
     'Name=default-release',
@@ -204,14 +202,7 @@ function Initialize-FirefoxProfile {
     'Default=1',
     ''
   )
-  $installLines = @(
-    "[Install$id]",
-    "Default=$relative",
-    'Locked=1',
-    ''
-  )
   Write-Utf8NoBom -Path $profilesIni -Lines $profileLines
-  Write-Utf8NoBom -Path $installsIni -Lines $installLines
   Write-Host "Created Firefox profile: $(Join-Path $profilesDir $dir)"
 }
 
@@ -314,7 +305,12 @@ function Get-InstallDefaults {
   foreach ($ini in $IniFiles) {
     $base = Split-Path -Parent $ini
     foreach ($section in @(Read-IniSections -Ini $ini)) {
-      if ($section.Name -notlike 'Install*') { continue }
+      # Firefox writes the install hash as 16 uppercase hex digits:
+      # profiles.ini uses [Install<hash>], installs.ini uses [<hash>].
+      # Older FurrOS installers wrote [Install<profile-id>] with a
+      # lowercase id; Firefox copied those into installs.ini as bare
+      # sections, but they are not real installation defaults.
+      if ($section.Name -cnotmatch '^(Install)?[0-9A-F]{16}$') { continue }
       if (-not $section.Data.ContainsKey('Default')) { continue }
 
       $value = [Environment]::ExpandEnvironmentVariables($section.Data['Default'])
@@ -350,7 +346,7 @@ function ConvertTo-ProfileObject {
   if ($Data.ContainsKey('Default') -and $Data['Default'] -eq '1') { $legacyDefault = $true }
   $initialized = (Test-Path -LiteralPath (Join-Path $path 'prefs.js') -PathType Leaf) -or
     (Test-Path -LiteralPath (Join-Path $path 'user.js') -PathType Leaf)
-  $preferred = $path -like '*.default-release'
+  $preferred = $path -like '*.default-release*'
 
   return [pscustomobject]@{
     Name = $name

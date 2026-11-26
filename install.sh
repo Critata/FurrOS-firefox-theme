@@ -32,6 +32,15 @@ trim() {
   printf '%s' "$1" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//'
 }
 
+# Firefox installation hashes are 16 uppercase hexadecimal digits:
+# profiles.ini writes them as [Install<hash>], installs.ini as [<hash>].
+# Older FurrOS installers wrote [Install<profile-id>] with a lowercase
+# 8-character id. Firefox copied those into installs.ini as bare sections,
+# but they are not real installation defaults and must be ignored.
+is_install_hash() {
+  [[ "$1" =~ ^[0-9A-F]{16}$ ]]
+}
+
 # WSL reports a Linux kernel, but Windows Firefox keeps its profile under
 # %APPDATA%. Interop is enabled by default, so cmd.exe and wslpath are
 # normally available; if they are not, the installer simply ignores Windows
@@ -325,13 +334,14 @@ capture_active_profiles() {
   fi
 }
 
-# A SIGKILL or a crash can leave lock files behind. If no Firefox process is
-# alive, a lock pointing at a dead PID (or an empty .parentlock) is stale and
-# must be removed: otherwise Firefox refuses to start and the theme appears
-# not to be applied even though every file was copied correctly.
+# A SIGKILL or a crash can leave lock files behind. This function only runs
+# when no Firefox process is visible, so every lock in a registered profile
+# is stale. The PID recorded inside the lock may have been reused by an
+# unrelated process; trusting it would leave Firefox unable to start and the
+# installer waiting for a lock that will never disappear.
 clear_stale_profile_locks() {
   [[ -z "$(firefox_pids)" ]] || return 0
-  local ini path name file target pid
+  local ini path name file
   while IFS= read -r ini; do
     [[ -f "$ini" ]] || continue
     while IFS= read -r path; do
@@ -341,18 +351,8 @@ clear_stale_profile_locks() {
       for name in lock parent.lock .parentlock; do
         file="$path/$name"
         [[ -e "$file" || -L "$file" ]] || continue
-        if [[ -L "$file" ]]; then
-          target="$(readlink "$file" 2>/dev/null)" || continue
-        elif [[ -r "$file" ]]; then
-          target="$(head -c 128 "$file" 2>/dev/null)" || continue
-        else
-          continue
-        fi
-        pid=""
-        [[ "$target" =~ :\+?([0-9]+)$ ]] && pid="${BASH_REMATCH[1]}"
-        if [[ -n "$pid" ]] && process_alive "$pid"; then
-          continue
-        fi
+        # Firefox may have been started again while this loop was running.
+        [[ -n "$(firefox_pids)" ]] && return 0
         echo "Removing stale profile lock: $file"
         rm -f "$file"
       done
@@ -366,7 +366,7 @@ wait_for_profile_locks() {
   while :; do
     found=""
     for name in parent.lock .parentlock lock; do
-      [[ -e "$profile/$name" ]] && found+=" $name"
+      [[ -e "$profile/$name" || -L "$profile/$name" ]] && found+=" $name"
     done
     [[ -z "$found" ]] && return 0
     if (( i >= seconds * 5 )); then
@@ -800,11 +800,9 @@ create_firefox_profile() {
   [[ "$found" -eq 1 ]] && return 0
 
   os="$(uname -s)"
-  installs_ini=""
   if [[ "$os" == "Darwin" ]]; then
     base="$HOME/Library/Application Support/Firefox/Profiles"
     ini="$HOME/Library/Application Support/Firefox/profiles.ini"
-    installs_ini="$HOME/Library/Application Support/Firefox/installs.ini"
   elif command -v flatpak >/dev/null 2>&1 \
     && flatpak run org.mozilla.firefox --version >/dev/null 2>&1; then
     base="$HOME/.var/app/org.mozilla.firefox/.mozilla/firefox"
@@ -838,16 +836,15 @@ create_firefox_profile() {
   if [[ ! -s "$ini" ]]; then
     printf '[General]\nStartWithLastProfile=1\nVersion=2\n' > "$ini"
   fi
-  append_ini_sections "$ini" "Install$id" "Default=$default_path
-Locked=1"
+  # Do not invent an [Install<hash>] section here. Firefox derives the hash
+  # from its own installation directory and creates installs.ini on first
+  # start; a fake hash is ignored (or, worse, migrated by Firefox and later
+  # mistaken for a real default). The legacy [Profile] Default=1 flag is
+  # enough to make Firefox pick this profile on first start.
   append_ini_sections "$ini" "Profile$index" "Name=default-release
 IsRelative=1
 Path=$default_path
 Default=1"
-  if [[ -n "$installs_ini" ]]; then
-    append_ini_sections "$installs_ini" "Install$id" "Default=$default_path
-Locked=1"
-  fi
   echo "Created Firefox profile: $base/$dir"
 }
 
@@ -911,7 +908,7 @@ emit_profile() {
 }
 
 parse_ini() {
-  local ini="$1" base line key value path name default section="" resolved
+  local ini="$1" base line key value path name default section="" resolved header hash
 
   base="$(cd "$(dirname "$ini")" && pwd -P)"
   path=""
@@ -935,14 +932,19 @@ parse_ini() {
         section="Profile"
         continue
         ;;
-      \[Install*\])
-        finish_profile
-        section="Install"
-        continue
-        ;;
       \[*\])
         finish_profile
         section=""
+        header="${line#\[}"
+        header="${header%\]}"
+        if [[ "$header" == Install* ]]; then
+          hash="${header#Install}"
+        else
+          hash="$header"
+        fi
+        if is_install_hash "$hash"; then
+          section="Install"
+        fi
         continue
         ;;
     esac
@@ -1023,7 +1025,7 @@ if [[ -z "$PROFILE" ]]; then
     [[ -f "$path/prefs.js" || -f "$path/user.js" ]] && established=1
     preferred=0
     case "$path" in
-      *.default-release) preferred=1 ;;
+      *.default-release*) preferred=1 ;;
     esac
 
     SCORED+=("$score"$'\t'"$managed"$'\t'"$established"$'\t'"$preferred"$'\t'"$path")

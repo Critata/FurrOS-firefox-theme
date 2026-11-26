@@ -70,7 +70,9 @@ fi
 
 for INI in "${SEEN_INIS[@]}"; do
   echo "  $INI"
-  grep -E '^\[(Profile|Install)|^(Path|Default|Name)=' "$INI" | sed 's/^/    /'
+  # Show every section: installs.ini uses bare [<hash>] names, profiles.ini
+  # uses [Install<hash>], and both matter for profile selection.
+  grep -E '^\[|^(Path|Default|Name)=' "$INI" | sed 's/^/    /'
 done
 [[ ${#SEEN_INIS[@]} -gt 0 ]] || echo "  none"
 echo

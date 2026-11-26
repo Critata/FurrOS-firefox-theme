@@ -809,7 +809,6 @@ def create_firefox_profile() -> None:
             return
 
     system = platform.system()
-    installs_ini: Path | None = None
     if system == "Windows":
         # A Store/MSIX Firefox uses a virtualised APPDATA under Packages.
         store_dir = windows_store_firefox_dir()
@@ -817,13 +816,11 @@ def create_firefox_profile() -> None:
         firefox_dir = store_dir or (Path(appdata) / "Mozilla" / "Firefox")
         base = firefox_dir / "Profiles"
         ini = firefox_dir / "profiles.ini"
-        installs_ini = firefox_dir / "installs.ini"
         relative = "Profiles/{profile_dir}"
     elif system == "Darwin":
         firefox_dir = Path.home() / "Library" / "Application Support" / "Firefox"
         base = firefox_dir / "Profiles"
         ini = firefox_dir / "profiles.ini"
-        installs_ini = firefox_dir / "installs.ini"
         # Paths are relative to the folder containing profiles.ini.
         relative = "Profiles/{profile_dir}"
     elif shutil.which("flatpak") and command_works(
@@ -851,16 +848,16 @@ def create_firefox_profile() -> None:
     default_path = relative.format(profile_dir=profile_dir)
 
     append_ini_sections(ini, "General", "StartWithLastProfile=1\nVersion=2")
-    append_ini_sections(ini, f"Install{profile_id}", f"Default={default_path}\nLocked=1")
+    # Do not invent an [Install<hash>] section here. Firefox derives the hash
+    # from its own installation directory and creates installs.ini on first
+    # start; a fake hash is ignored (or, worse, migrated by Firefox and later
+    # mistaken for a real default). The legacy [Profile] Default=1 flag is
+    # enough to make Firefox pick this profile on first start.
     append_ini_sections(
         ini,
         f"Profile{next_profile_index(ini)}",
         f"Name=default-release\nIsRelative=1\nPath={default_path}\nDefault=1",
     )
-    if installs_ini is not None:
-        append_ini_sections(
-            installs_ini, f"Install{profile_id}", f"Default={default_path}\nLocked=1"
-        )
     print(f"Created Firefox profile: {profile_path}")
 
 
@@ -1011,7 +1008,13 @@ def read_install_defaults(ini: Path) -> set[Path]:
 
     found: set[Path] = set()
     for section in parser.sections():
-        if not section.lower().startswith("install"):
+        # Firefox writes the install hash as 16 uppercase hex digits:
+        # profiles.ini uses [Install<hash>], installs.ini uses [<hash>].
+        # Older FurrOS installers wrote [Install<profile-id>] with a
+        # lowercase id; Firefox copied those into installs.ini as bare
+        # sections, but they are not real installation defaults.
+        match = re.fullmatch(r"(?:Install)?([0-9A-F]{16})", section)
+        if not match:
             continue
         raw = parser.get(section, "Default", fallback="").strip()
         if not raw:
@@ -1131,7 +1134,7 @@ def choose_profile(
         resolved = Path(item["resolved"])
         managed = (resolved / MANAGED_MARKER).is_file()
         established = (resolved / "prefs.js").is_file() or (resolved / "user.js").is_file()
-        preferred = resolved.name.endswith(".default-release")
+        preferred = ".default-release" in resolved.name
         return (
             -score(item),
             -int(managed),

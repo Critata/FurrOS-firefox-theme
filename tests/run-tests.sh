@@ -28,8 +28,10 @@ pass "user.js stylesheet preference"
 BIN="$TMP/bin"
 mkdir -p "$BIN"
 printf '#!/bin/sh\nexit 1\n' > "$BIN/pgrep"
+printf '#!/bin/sh\nexit 1\n' > "$BIN/flatpak"
+printf '#!/bin/sh\nexit 1\n' > "$BIN/snap"
 printf '#!/bin/sh\necho "Mozilla Firefox 161.0"\n' > "$BIN/fake-firefox"
-chmod +x "$BIN/pgrep" "$BIN/fake-firefox"
+chmod +x "$BIN/pgrep" "$BIN/flatpak" "$BIN/snap" "$BIN/fake-firefox"
 
 HOME_DIR="$TMP/home"
 BASE="$HOME_DIR/.config/mozilla/firefox"
@@ -86,6 +88,71 @@ pass "legacy Default=1 profile untouched"
 [[ ! -d "$HOME_DIR/.mozilla" ]] || fail "installer created a stray ~/.mozilla profile"
 pass "no duplicate profile created"
 
+# Flatpak regression: the real default lives in installs.ini under a bare
+# 16-character hash. An older FurrOS installer also wrote a fake
+# [Install<profile-id>] section with a lowercase id; Firefox migrated it into
+# installs.ini as a bare section. The fake section must never win, even when
+# its profile looks "preferred" (.default-release) and carries a stale lock
+# whose recorded PID belongs to an unrelated live process.
+FLAT_HOME="$TMP/flatpak-home"
+FLAT_BASE="$FLAT_HOME/.var/app/org.mozilla.firefox/.mozilla/firefox"
+FLAT_REAL="$FLAT_BASE/5ve3on5z.default-release-1"
+FLAT_PHANTOM="$FLAT_BASE/a587acde.default-release"
+mkdir -p "$FLAT_REAL" "$FLAT_PHANTOM"
+: > "$FLAT_REAL/prefs.js"
+: > "$FLAT_PHANTOM/user.js"
+printf '127.0.1.1:+%s\n' "$$" > "$FLAT_REAL/lock"
+: > "$FLAT_REAL/.parentlock"
+
+cat > "$FLAT_BASE/profiles.ini" <<'EOF'
+[General]
+StartWithLastProfile=1
+Version=2
+
+[Profile0]
+Name=default-release
+IsRelative=1
+Path=a587acde.default-release
+Default=1
+
+[Profile1]
+Name=default-release-1
+IsRelative=1
+Path=5ve3on5z.default-release-1
+
+[Install4F96D1932A9F858E]
+Default=5ve3on5z.default-release-1
+Locked=1
+
+[Installa587acde]
+Default=a587acde.default-release
+Locked=1
+EOF
+
+cat > "$FLAT_BASE/installs.ini" <<'EOF'
+[4F96D1932A9F858E]
+Default=5ve3on5z.default-release-1
+Locked=1
+
+[a587acde]
+Default=a587acde.default-release
+Locked=1
+EOF
+
+PATH="$BIN:$PATH" HOME="$FLAT_HOME" FURR_FIREFOX_BIN="$BIN/fake-firefox" \
+  "$ROOT/install.sh" </dev/null > "$TMP/flatpak.out" 2>&1 \
+  || { cat "$TMP/flatpak.out" >&2; fail "Flatpak-style install failed"; }
+
+FLAT_EXPECTED="$(cd "$FLAT_REAL" && pwd -P)"
+grep -Fq "Selected profile: $FLAT_EXPECTED" "$TMP/flatpak.out" \
+  || { cat "$TMP/flatpak.out" >&2; fail "Flatpak installs.ini default was not selected"; }
+[[ -f "$FLAT_REAL/chrome/userChrome.css" ]] || fail "theme missing from the Flatpak profile"
+[[ ! -e "$FLAT_PHANTOM/chrome" ]] \
+  || fail "theme was installed into the fake [Install] profile"
+[[ ! -e "$FLAT_REAL/lock" && ! -e "$FLAT_REAL/.parentlock" ]] \
+  || fail "stale lock with a live unrelated PID was not removed"
+pass "Flatpak installs.ini hash wins over fake [Install] sections and stale locks"
+
 if command -v python3 >/dev/null 2>&1; then
   PYTHONPATH="$ROOT" HOME="$HOME_DIR" python3 -B - <<'PY' || fail "Python installer chose the wrong profile"
 import os
@@ -113,8 +180,11 @@ grep -Fq 'PROCESSOR_ARCHITECTURE' "$ROOT/install.ps1" \
   || fail "PowerShell installer does not select the Windows download architecture"
 grep -Fq 'UTF8Encoding' "$ROOT/install.ps1" \
   || fail "PowerShell installer writes ini files with a legacy encoding"
-grep -Fq '[Install$id]' "$ROOT/install.ps1" \
-  || fail "PowerShell installer does not write the [Install] default"
+grep -Fq "cnotmatch '^(Install)?[0-9A-F]{16}$'" "$ROOT/install.ps1" \
+  || fail "PowerShell installer does not validate real [Install] hashes"
+if grep -Fq '[Install$id]' "$ROOT/install.ps1"; then
+  fail "PowerShell installer still writes a fake [Install] hash"
+fi
 grep -Fq 'CompareOrdinal' "$ROOT/install.ps1" \
   || fail "PowerShell installer tie-break is not deterministic"
 pass "PowerShell installer uses real locations, Store profiles and deterministic selection"
@@ -143,7 +213,8 @@ other.mkdir(parents=True, exist_ok=True)
     encoding="utf-8",
 )
 (firefox / "installs.ini").write_text(
-    "[Install12345678]\nDefault=Profiles/abcd.default-release\nLocked=1\n",
+    "[4F96D1932A9F858E]\nDefault=Profiles/abcd.default-release\nLocked=1\n\n"
+    "[deadbeef]\nDefault=Profiles/efgh.default\nLocked=1\n",
     encoding="utf-8",
 )
 
@@ -155,6 +226,8 @@ try:
     inis = install.candidate_ini_files()
     assert firefox / "profiles.ini" in inis, inis
     assert firefox / "installs.ini" in inis, inis
+    defaults = install.read_install_defaults(firefox / "installs.ini")
+    assert defaults == {default.resolve()}, defaults
     chosen = install.choose_profile(None)
     assert chosen == default, (chosen, default)
     install.create_firefox_profile()
@@ -184,7 +257,9 @@ try:
     assert chosen_dir == store / "Firefox", chosen_dir
     install.create_firefox_profile()
     assert (store / "Firefox" / "profiles.ini").is_file(), "Store profiles.ini missing"
-    assert (store / "Firefox" / "installs.ini").is_file(), "Store installs.ini missing"
+    assert not (store / "Firefox" / "installs.ini").exists(), (
+        "create_firefox_profile invented a fake installs.ini hash"
+    )
     created = list((store / "Firefox" / "Profiles").iterdir())
     assert len(created) == 1 and created[0].is_dir(), created
     assert install.choose_profile(None).resolve() == created[0].resolve()
@@ -279,7 +354,7 @@ Path=Profiles/efgh.default
 Default=1
 EOF
 cat > "$MAC_FIREFOX/installs.ini" <<'EOF'
-[InstallABCDEF12]
+[4F96D1932A9F858E]
 Default=Profiles/abcd.default-release
 Locked=1
 EOF
@@ -335,10 +410,12 @@ CREATED_COUNT="$(find "$FIRST_PROFILES" -mindepth 1 -maxdepth 1 -type d | wc -l 
 BASE_NAME="$(basename "$CREATED")"
 grep -Fq "Path=Profiles/$BASE_NAME" "$FIRST_FIREFOX/profiles.ini" \
   || fail "macOS profiles.ini does not point to the created profile"
-grep -Fq "Default=Profiles/$BASE_NAME" "$FIRST_FIREFOX/profiles.ini" \
-  || fail "macOS profiles.ini has no [Install] default"
-grep -Fq "Default=Profiles/$BASE_NAME" "$FIRST_FIREFOX/installs.ini" \
-  || fail "macOS installs.ini has no default"
+grep -Fq 'Default=1' "$FIRST_FIREFOX/profiles.ini" \
+  || fail "macOS profiles.ini has no legacy default"
+if grep -Fq '[Install' "$FIRST_FIREFOX/profiles.ini" \
+  || [[ -e "$FIRST_FIREFOX/installs.ini" ]]; then
+  fail "first macOS install invented a fake [Install] hash"
+fi
 grep -Fq "Selected profile: $CREATED" "$TMP/mac-first.out" \
   || { cat "$TMP/mac-first.out" >&2; fail "first macOS install chose the wrong profile"; }
 for file in userChrome.css userContent.css; do
@@ -417,7 +494,8 @@ other.mkdir(parents=True, exist_ok=True)
     encoding="utf-8",
 )
 (firefox / "installs.ini").write_text(
-    "[InstallABCDEF12]\nDefault=Profiles/abcd.default-release\nLocked=1\n",
+    "[4F96D1932A9F858E]\nDefault=Profiles/abcd.default-release\nLocked=1\n\n"
+    "[deadbeef]\nDefault=Profiles/efgh.default\nLocked=1\n",
     encoding="utf-8",
 )
 stale = firefox / "Profiles" / "profiles.ini"
@@ -432,6 +510,7 @@ inis = install.candidate_ini_files()
 assert firefox / "profiles.ini" in inis, inis
 assert firefox / "installs.ini" in inis, inis
 assert stale not in inis, inis
+assert install.read_install_defaults(firefox / "installs.ini") == {default.resolve()}
 assert install.choose_profile(None).resolve() == default.resolve()
 
 # Equal scores must be resolved automatically: prefer an initialized
@@ -465,10 +544,10 @@ created = list(first_profiles.iterdir())
 assert len(created) == 1 and created[0].is_dir(), created
 name = created[0].name
 profile_ini = (first_firefox / "profiles.ini").read_text(encoding="utf-8")
-installs_ini = (first_firefox / "installs.ini").read_text(encoding="utf-8")
 assert f"Path=Profiles/{name}" in profile_ini, profile_ini
-assert f"Default=Profiles/{name}" in profile_ini, profile_ini
-assert f"Default=Profiles/{name}" in installs_ini, installs_ini
+assert "Default=1" in profile_ini, profile_ini
+assert "[Install" not in profile_ini, profile_ini
+assert not (first_firefox / "installs.ini").exists(), "fake installs.ini was written"
 assert install.choose_profile(None).resolve() == created[0].resolve()
 PY
   pass "Python installer matches macOS layout and never prompts"
@@ -507,7 +586,7 @@ Name=default-release
 IsRelative=1
 Path=abcd1234.default-release
 
-[Install12345678]
+[Install4F96D1932A9F858E]
 Default=abcd1234.default-release
 Locked=1
 EOF
@@ -554,7 +633,7 @@ StartWithLastProfile=1
 Version=2
 CustomKey=keep-me
 
-[Install12345678]
+[Install4F96D1932A9F858E]
 Default=missing.default-release
 Locked=1
 EOF
@@ -566,7 +645,7 @@ grep -Fq 'Created Firefox profile' "$TMP/idem-first.out" \
   || { cat "$TMP/idem-first.out" >&2; fail "no profile was created on first run"; }
 grep -Fq 'CustomKey=keep-me' "$IDEM_BASE/profiles.ini" \
   || fail "existing ini settings were overwritten"
-grep -Fq '[Install12345678]' "$IDEM_BASE/profiles.ini" \
+grep -Fq '[Install4F96D1932A9F858E]' "$IDEM_BASE/profiles.ini" \
   || fail "existing [Install] section was overwritten"
 IDEM_PROFILE=""
 for item in "$IDEM_BASE"/*.default-release; do
