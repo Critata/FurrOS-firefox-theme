@@ -18,7 +18,8 @@ version() {
     || firefox-esr --version 2>/dev/null \
     || flatpak run org.mozilla.firefox --version 2>/dev/null \
     || snap run firefox --version 2>/dev/null \
-    || /Applications/Firefox.app/Contents/MacOS/firefox --version 2>/dev/null
+    || /Applications/Firefox.app/Contents/MacOS/firefox --version 2>/dev/null \
+    || "$HOME/Applications/Firefox.app/Contents/MacOS/firefox" --version 2>/dev/null
 }
 
 echo "Firefox version:"

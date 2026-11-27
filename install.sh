@@ -117,7 +117,7 @@ if [[ "$(id -u)" -eq 0 && ( "$HOME" == "/root" || "$HOME" == "/var/root" ) ]]; t
   echo "unless you intentionally want to change root's Firefox profile." >&2
 fi
 
-trap 'code=$?; if [[ $code -ne 0 ]]; then echo; echo "INSTALL FAILED (exit $code)."; echo "Report: $REPORT"; [[ -t 0 ]] && read -rp "Press Enter to close..." || true; fi' EXIT
+trap 'code=$?; if [[ $code -ne 0 ]]; then echo; echo "INSTALL FAILED (exit $code)."; echo "Report: $REPORT"; if [[ -t 0 && -z "${FURR_NO_PAUSE:-}" ]]; then read -rp "Press Enter to close..." || true; fi; fi' EXIT
 
 windows_firefox_dir() {
   # Print the Unix path of %APPDATA%\Mozilla\Firefox when running under WSL.
@@ -278,7 +278,16 @@ firefox_binary() {
   case "$(profile_container "${PROFILE:-}")" in
     Flatpak) printf 'flatpak run org.mozilla.firefox\n' ;;
     Snap) printf 'snap run firefox\n' ;;
-    *) command -v firefox || command -v firefox-esr || printf 'unknown\n' ;;
+    *)
+      if [[ "$(uname -s)" == "Darwin" ]]; then
+        local bin
+        while IFS= read -r bin; do
+          printf '%s\n' "$bin"
+          return
+        done < <(macos_firefox_binaries)
+      fi
+      command -v firefox || command -v firefox-esr || printf 'unknown\n'
+      ;;
   esac
 }
 
@@ -473,7 +482,32 @@ handle_running_firefox() {
   return 0
 }
 
+# macOS installs Firefox.app in /Applications, but users can also install it
+# in ~/Applications. Finder-based installs and some managed Macs use the
+# per-user location, so both are checked before falling back to PATH.
+macos_firefox_binaries() {
+  local app
+  for app in \
+    "/Applications/Firefox.app" \
+    "$HOME/Applications/Firefox.app"; do
+    if [[ -x "$app/Contents/MacOS/firefox" ]]; then
+      printf '%s\n' "$app/Contents/MacOS/firefox"
+    fi
+  done
+  return 0
+}
+
 firefox_ready() {
+  local candidate
+
+  if [[ "$(uname -s)" == "Darwin" ]]; then
+    while IFS= read -r candidate; do
+      if "$candidate" --version >/dev/null 2>&1; then
+        return 0
+      fi
+    done < <(macos_firefox_binaries)
+  fi
+
   if command -v firefox >/dev/null 2>&1 && firefox --version >/dev/null 2>&1; then
     return 0
   fi
@@ -492,13 +526,6 @@ firefox_ready() {
       return 0
     fi
   done
-
-  if [[ "$(uname -s)" == "Darwin" \
-    && -x "/Applications/Firefox.app/Contents/MacOS/firefox" ]]; then
-    if /Applications/Firefox.app/Contents/MacOS/firefox --version >/dev/null 2>&1; then
-      return 0
-    fi
-  fi
 
   if command -v flatpak >/dev/null 2>&1 \
     && [[ "$(flatpak list --app 2>/dev/null)" == *org.mozilla.firefox* ]] \
@@ -529,6 +556,100 @@ firefox_installed() {
     return 0
   fi
   firefox_ready
+}
+
+# Build the command used to start Firefox once for profile initialization.
+# The result is stored in FIREFOX_LAUNCH so arguments with spaces (Flatpak,
+# Snap, app bundles) survive without eval.
+firefox_launch_command() {
+  FIREFOX_LAUNCH=()
+
+  if [[ -n "${FURR_FIREFOX_BIN:-}" ]]; then
+    if [[ -x "$FURR_FIREFOX_BIN" ]]; then
+      FIREFOX_LAUNCH=("$FURR_FIREFOX_BIN")
+      return 0
+    fi
+    return 1
+  fi
+
+  if [[ "$(uname -s)" == "Darwin" ]]; then
+    local bin
+    while IFS= read -r bin; do
+      FIREFOX_LAUNCH=("$bin")
+      return 0
+    done < <(macos_firefox_binaries)
+    return 1
+  fi
+
+  local name
+  for name in firefox firefox-esr; do
+    if command -v "$name" >/dev/null 2>&1; then
+      FIREFOX_LAUNCH=("$name")
+      return 0
+    fi
+  done
+  if command -v flatpak >/dev/null 2>&1 \
+    && flatpak run org.mozilla.firefox --version >/dev/null 2>&1; then
+    FIREFOX_LAUNCH=(flatpak run org.mozilla.firefox)
+    return 0
+  fi
+  if command -v snap >/dev/null 2>&1 \
+    && snap run firefox --version >/dev/null 2>&1; then
+    FIREFOX_LAUNCH=(snap run firefox)
+    return 0
+  fi
+  return 1
+}
+
+# Run a command with a timeout without depending on GNU timeout, which macOS
+# does not ship. Returns the command's exit status, or 1 after killing it.
+run_with_timeout() {
+  local seconds="$1" pid i state
+  shift
+  "$@" >/dev/null 2>&1 &
+  pid=$!
+  for ((i = 0; i < seconds * 10; i++)); do
+    state="$(ps -o stat= -p "$pid" 2>/dev/null | tr -d '[:space:]')"
+    if [[ -z "$state" || "$state" == Z* ]]; then
+      if wait "$pid" 2>/dev/null; then
+        return 0
+      fi
+      return 1
+    fi
+    sleep 0.1
+  done
+  kill -TERM "$pid" 2>/dev/null || true
+  sleep 1
+  state="$(ps -o stat= -p "$pid" 2>/dev/null | tr -d '[:space:]')"
+  if [[ -n "$state" && "$state" != Z* ]]; then
+    kill -KILL "$pid" 2>/dev/null || true
+  fi
+  wait "$pid" 2>/dev/null || true
+  return 1
+}
+
+# Modern Firefox (67+) ignores a hand-written [Profile] Default=1 and creates
+# its own dedicated profile on first start. A profile created by the installer
+# would therefore never be used and the theme would look missing until Firefox
+# is reinstalled. Starting Firefox once in headless mode lets Firefox create
+# the real default profile and installs.ini; the theme is then installed into
+# the profile Firefox will actually open.
+initialize_firefox_profile() {
+  local tmp
+  firefox_launch_command || return 1
+  tmp="$(mktemp -d)"
+  echo "Initializing the Firefox profile..."
+  if ! run_with_timeout 120 "${FIREFOX_LAUNCH[@]}" \
+    --headless --new-instance --screenshot "$tmp/shot.png" about:blank; then
+    rm -rf "$tmp"
+    return 1
+  fi
+  rm -rf "$tmp"
+  # A headless run can leave .parentlock and lock behind even after a clean
+  # exit. No Firefox process is alive now, so these locks are stale.
+  clear_stale_profile_locks
+  wait_for_all_profile_locks || return 1
+  return 0
 }
 
 run_as_root() {
@@ -725,6 +846,21 @@ profile_ini_candidates() {
   # Firefox reads both profiles.ini and installs.ini. A profiles.ini inside
   # Profiles/ is never used by Firefox: older FurrOS installers wrote one
   # there, so it is deliberately excluded on every platform.
+  #
+  # On macOS the native profile root is checked first. A stale Linux-style
+  # ~/.mozilla or ~/.config profile must never win over the profile Firefox
+  # actually uses.
+  local mac=0
+  if [[ "$(uname -s)" == "Darwin" ]]; then
+    mac=1
+  fi
+
+  if [[ "$mac" -eq 1 ]]; then
+    printf '%s\n' \
+      "$HOME/Library/Application Support/Firefox/profiles.ini" \
+      "$HOME/Library/Application Support/Firefox/installs.ini"
+  fi
+
   printf '%s\n' \
     "$HOME/.mozilla/firefox/profiles.ini" \
     "$HOME/.mozilla/firefox/installs.ini" \
@@ -735,9 +871,13 @@ profile_ini_candidates() {
     "$HOME/snap/firefox/common/.mozilla/firefox/profiles.ini" \
     "$HOME/snap/firefox/common/.mozilla/firefox/installs.ini" \
     "$HOME/.var/app/org.mozilla.firefox/.mozilla/firefox/profiles.ini" \
-    "$HOME/.var/app/org.mozilla.firefox/.mozilla/firefox/installs.ini" \
-    "$HOME/Library/Application Support/Firefox/profiles.ini" \
-    "$HOME/Library/Application Support/Firefox/installs.ini"
+    "$HOME/.var/app/org.mozilla.firefox/.mozilla/firefox/installs.ini"
+
+  if [[ "$mac" -eq 0 ]]; then
+    printf '%s\n' \
+      "$HOME/Library/Application Support/Firefox/profiles.ini" \
+      "$HOME/Library/Application Support/Firefox/installs.ini"
+  fi
 
   windows_ini_candidates
 }
@@ -768,8 +908,21 @@ next_profile_index() {
   printf '%d' "$((max + 1))"
 }
 
+# True when at least one existing directory is registered as a Firefox
+# profile in any standard profiles.ini or installs.ini.
+has_registered_profile() {
+  local candidate path
+  while IFS= read -r candidate; do
+    [[ -f "$candidate" ]] || continue
+    while IFS= read -r path; do
+      [[ -d "$path" ]] && return 0
+    done < <(ini_profile_paths "$candidate")
+  done < <(profile_ini_candidates)
+  return 1
+}
+
 create_firefox_profile() {
-  local candidate base ini installs_ini default_path id dir found=0 os managed index
+  local candidate base ini default_path id dir os managed index
 
   # Reuse a profile previously created by this project. It carries a marker
   # file, so re-runs never add a second FurrOS profile.
@@ -786,18 +939,19 @@ create_firefox_profile() {
   # Never create a second profile when Firefox already has a usable profile
   # in any standard location (including Flatpak and Snap). Reading Path=
   # directly also covers ini files that only contain [Install...] entries.
-  while IFS= read -r candidate; do
-    [[ -f "$candidate" ]] || continue
-    while IFS= read -r path; do
-      # An existing directory registered in an ini is a Firefox profile,
-      # even when Firefox has not written prefs.js yet. Creating another one
-      # here would leave the user with two competing defaults.
-      found=1
-      break
-    done < <(ini_profile_paths "$candidate")
-    [[ "$found" -eq 1 ]] && break
-  done < <(profile_ini_candidates)
-  [[ "$found" -eq 1 ]] && return 0
+  # An existing directory registered in an ini is a Firefox profile, even
+  # when Firefox has not written prefs.js yet.
+  if has_registered_profile; then
+    return 0
+  fi
+
+  # No profile exists yet. Let Firefox create its real default profile and
+  # installs.ini instead of writing a Default=1 profile that Firefox 67+
+  # ignores. If Firefox cannot be started (for example under WSL when only
+  # the Windows browser exists), fall back to the manual profile below.
+  if initialize_firefox_profile && has_registered_profile; then
+    return 0
+  fi
 
   os="$(uname -s)"
   if [[ "$os" == "Darwin" ]]; then
@@ -858,7 +1012,9 @@ capture_active_profiles
 handle_running_firefox || exit 1
 clear_stale_profile_locks
 
-if [[ "$UNINSTALL" -ne 1 ]]; then
+# A manual --profile is used as-is: do not create or initialize another
+# profile behind the user's back.
+if [[ "$UNINSTALL" -ne 1 && -z "$PROFILE" ]]; then
   create_firefox_profile
 fi
 
@@ -1073,6 +1229,7 @@ while [[ -e "$PROFILE/user.js.bak-$TS" \
 done
 
 version() {
+  local bin
   if [[ -n "${FURR_FIREFOX_BIN:-}" && -x "$FURR_FIREFOX_BIN" ]]; then
     "$FURR_FIREFOX_BIN" --version 2>/dev/null && return 0
   fi
@@ -1080,8 +1237,12 @@ version() {
     || firefox-esr --version 2>/dev/null \
     || flatpak run org.mozilla.firefox --version 2>/dev/null \
     || snap run firefox --version 2>/dev/null \
-    || /Applications/Firefox.app/Contents/MacOS/firefox --version 2>/dev/null \
-    || { [[ "$WSL" -eq 1 ]] && echo "Firefox on Windows (WSL)"; } \
+    || {
+      while IFS= read -r bin; do
+        "$bin" --version 2>/dev/null && return 0
+      done < <(macos_firefox_binaries)
+      [[ "$WSL" -eq 1 ]] && echo "Firefox on Windows (WSL)"
+    } \
     || echo "version unavailable"
 }
 

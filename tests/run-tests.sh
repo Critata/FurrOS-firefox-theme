@@ -255,7 +255,7 @@ install.platform.system = lambda: "Windows"
 try:
     chosen_dir = install.windows_store_firefox_dir()
     assert chosen_dir == store / "Firefox", chosen_dir
-    install.create_firefox_profile()
+    install.create_firefox_profile(initialize=False)
     assert (store / "Firefox" / "profiles.ini").is_file(), "Store profiles.ini missing"
     assert not (store / "Firefox" / "installs.ini").exists(), (
         "create_firefox_profile invented a fake installs.ini hash"
@@ -283,15 +283,61 @@ if grep -Fq 'Choose the profile number' "$ROOT/install.sh" \
   || grep -Fq 'Read-Host' "$ROOT/install.ps1" \
   || grep -Eq '^pause[[:space:]]*$' "$ROOT/install.bat" \
   || grep -Fq 'Press Enter to close' "$ROOT/install.desktop" \
-  || grep -Eq '^read[[:space:]]' "$ROOT/diagnose.sh" \
-  || grep -Eq '^[[:space:]]*read[[:space:]]' "$ROOT/install.command"; then
+  || grep -Eq '^read[[:space:]]' "$ROOT/diagnose.sh"; then
   fail "an installer or launcher still asks for interactive input"
 fi
 grep -Fq 'if not "%EXITCODE%"=="0" (' "$ROOT/install.bat" \
   || fail "the CMD launcher must pause only after a failure"
 grep -Fq 'FURR_INSTALL_DIR' "$ROOT/install.desktop" \
   || fail "the desktop launcher has no documented directory override"
+if grep -Fq 'Choose the profile' "$ROOT/install.command" \
+  || grep -Fq 'Multiple Firefox profiles' "$ROOT/install.command"; then
+  fail "the macOS launcher still asks for a profile"
+fi
 pass "profile selection is fully automatic and launchers are non-interactive"
+
+# The macOS launcher must work from any working directory, pass arguments
+# through, keep the Terminal window open only on a terminal, and return the
+# installer's exit status instead of closing on top of the error.
+LAUNCH_DIR="$TMP/launcher"
+mkdir -p "$LAUNCH_DIR"
+cp "$ROOT/install.command" "$LAUNCH_DIR/install.command"
+cat > "$LAUNCH_DIR/install.sh" <<'EOF'
+#!/usr/bin/env bash
+echo "fake installer output"
+echo "pause-flag=${FURR_NO_PAUSE:-unset}"
+exit 7
+EOF
+chmod +x "$LAUNCH_DIR/install.sh"
+LAUNCH_STATUS=0
+( cd / && bash "$LAUNCH_DIR/install.command" --force </dev/null > "$TMP/launcher-fail.out" 2>&1 ) \
+  || LAUNCH_STATUS=$?
+[[ "$LAUNCH_STATUS" -eq 7 ]] || fail "install.command did not return the installer exit status"
+grep -Fq 'fake installer output' "$TMP/launcher-fail.out" \
+  || fail "install.command hid the installer output"
+grep -Fq 'pause-flag=1' "$TMP/launcher-fail.out" \
+  || fail "install.command did not disable the installer's own pause"
+grep -Fq 'FurrOS installation failed (exit 7)' "$TMP/launcher-fail.out" \
+  || fail "install.command did not report the failure"
+grep -Fq 'Press Enter to close this window' "$LAUNCH_DIR/install.command" \
+  || fail "install.command does not keep the Terminal window open"
+
+cat > "$LAUNCH_DIR/install.sh" <<'EOF'
+#!/usr/bin/env bash
+echo "success output"
+exit 0
+EOF
+chmod +x "$LAUNCH_DIR/install.sh"
+LAUNCH_STATUS=0
+( cd / && bash "$LAUNCH_DIR/install.command" </dev/null > "$TMP/launcher-ok.out" 2>&1 ) \
+  || LAUNCH_STATUS=$?
+[[ "$LAUNCH_STATUS" -eq 0 ]] || fail "install.command failed on a successful install"
+grep -Fq 'FurrOS theme installed successfully.' "$TMP/launcher-ok.out" \
+  || fail "install.command did not confirm success"
+if grep -Fq 'exec bash' "$ROOT/install.command"; then
+  fail "install.command uses exec and closes the Terminal window too early"
+fi
+pass "macOS launcher stays open and preserves the installer exit status"
 
 grep -Fq 'wslpath' "$ROOT/install.sh" || fail "install.sh ignores Windows profiles under WSL"
 grep -Fq 'wsl_windows_firefox_dir' "$ROOT/install.py" || fail "install.py ignores Windows profiles under WSL"
@@ -427,6 +473,67 @@ cmp -s "$ROOT/user.js" "$CREATED/user.js" || fail "missing user.js after first m
   || fail "first macOS install created a stray Linux profile"
 pass "first macOS install works without a second run"
 
+# Firefox installed only in ~/Applications, with no profile yet: the
+# installer must find the app and let Firefox create its real default
+# profile instead of writing a Default=1 profile that Firefox would ignore.
+MAC_APP_HOME="$TMP/macapphome"
+MAC_APP_BIN="$TMP/macappbin"
+MAC_APP="$MAC_APP_HOME/Applications/Firefox.app/Contents/MacOS"
+mkdir -p "$MAC_APP" "$MAC_APP_BIN"
+cat > "$MAC_APP/firefox" <<'EOF'
+#!/bin/sh
+if [ "${1:-}" = "--version" ]; then
+  echo "Mozilla Firefox 161.0"
+  exit 0
+fi
+FF="$HOME/Library/Application Support/Firefox"
+mkdir -p "$FF/Profiles/real.default-release"
+cat > "$FF/profiles.ini" <<'INI'
+[General]
+StartWithLastProfile=1
+Version=2
+
+[Profile0]
+Name=default-release
+IsRelative=1
+Path=Profiles/real.default-release
+
+[Install4F96D1932A9F858E]
+Default=Profiles/real.default-release
+Locked=1
+INI
+cat > "$FF/installs.ini" <<'INI'
+[4F96D1932A9F858E]
+Default=Profiles/real.default-release
+Locked=1
+INI
+exit 0
+EOF
+chmod +x "$MAC_APP/firefox"
+printf '#!/bin/sh\necho Darwin\n' > "$MAC_APP_BIN/uname"
+printf '#!/bin/sh\nexit 1\n' > "$MAC_APP_BIN/pgrep"
+printf '#!/bin/sh\nexit 1\n' > "$MAC_APP_BIN/firefox"
+chmod +x "$MAC_APP_BIN/uname" "$MAC_APP_BIN/pgrep" "$MAC_APP_BIN/firefox"
+
+HOME="$MAC_APP_HOME" PATH="$MAC_APP_BIN:$PATH" \
+  "$ROOT/install.sh" </dev/null > "$TMP/mac-app.out" 2>&1 \
+  || { cat "$TMP/mac-app.out" >&2; fail "macOS ~/Applications install failed"; }
+
+MAC_REAL="$MAC_APP_HOME/Library/Application Support/Firefox/Profiles/real.default-release"
+MAC_REAL_EXPECTED="$(cd "$MAC_REAL" && pwd -P)"
+grep -Fq "Selected profile: $MAC_REAL_EXPECTED" "$TMP/mac-app.out" \
+  || { cat "$TMP/mac-app.out" >&2; fail "macOS ~/Applications profile was not selected"; }
+grep -Fq 'Initializing the Firefox profile' "$TMP/mac-app.out" \
+  || fail "installer did not initialize the real Firefox profile"
+if grep -Fq 'Created Firefox profile' "$TMP/mac-app.out"; then
+  fail "installer wrote a manual profile instead of using Firefox's profile"
+fi
+[[ -f "$MAC_REAL/chrome/userChrome.css" ]] \
+  || fail "theme missing from the headless-created profile"
+[[ -f "$MAC_APP_HOME/Library/Application Support/Firefox/installs.ini" ]] \
+  || fail "headless initialization did not create installs.ini"
+pass "macOS ~/Applications Firefox is found and its real profile is used"
+
 # Equal scores must not trigger the old profile-choice menu.
 MAC_TIE_HOME="$TMP/mactie"
 MAC_TIE_FIREFOX="$MAC_TIE_HOME/Library/Application Support/Firefox"
@@ -533,11 +640,12 @@ preferred.mkdir(parents=True, exist_ok=True)
 )
 assert install.choose_profile(None).resolve() == established.resolve()
 
-# First run: create the profile where macOS Firefox actually looks.
+# First run without a usable Firefox binary: the manual fallback still
+# creates the profile where macOS Firefox actually looks.
 first_home = root / "first"
 first_home.mkdir(parents=True, exist_ok=True)
 os.environ["HOME"] = str(first_home)
-install.create_firefox_profile()
+install.create_firefox_profile(initialize=False)
 first_firefox = first_home / "Library" / "Application Support" / "Firefox"
 first_profiles = first_firefox / "Profiles"
 created = list(first_profiles.iterdir())
@@ -551,6 +659,46 @@ assert not (first_firefox / "installs.ini").exists(), "fake installs.ini was wri
 assert install.choose_profile(None).resolve() == created[0].resolve()
 PY
   pass "Python installer matches macOS layout and never prompts"
+fi
+
+if command -v python3 >/dev/null 2>&1; then
+  MAC_PY_INIT="$TMP/macpyinit" PYTHONPATH="$ROOT" python3 -B - <<'PY' || fail "Python macOS headless profile initialization failed"
+import os
+from pathlib import Path
+import install
+
+root = Path(os.environ["MAC_PY_INIT"])
+home = root / "home"
+home.mkdir(parents=True, exist_ok=True)
+os.environ["HOME"] = str(home)
+os.environ.pop("FURR_FIREFOX_BIN", None)
+install.platform.system = lambda: "Darwin"
+
+fake = root / "fake-firefox"
+fake.write_text(
+    "#!/bin/sh\n"
+    'if [ "${1:-}" = "--version" ]; then echo "Mozilla Firefox 161.0"; exit 0; fi\n'
+    'FF="$HOME/Library/Application Support/Firefox"\n'
+    'mkdir -p "$FF/Profiles/real.default-release"\n'
+    "printf '[General]\\nStartWithLastProfile=1\\nVersion=2\\n\\n"
+    "[Profile0]\\nName=default-release\\nIsRelative=1\\nPath=Profiles/real.default-release\\n\\n"
+    "[Install4F96D1932A9F858E]\\nDefault=Profiles/real.default-release\\nLocked=1\\n' > \"$FF/profiles.ini\"\n"
+    "printf '[4F96D1932A9F858E]\\nDefault=Profiles/real.default-release\\nLocked=1\\n' > \"$FF/installs.ini\"\n"
+    "exit 0\n",
+    encoding="utf-8",
+)
+fake.chmod(0o755)
+install.macos_firefox_binaries = lambda: [fake]
+install.create_firefox_profile()
+
+firefox = home / "Library" / "Application Support" / "Firefox"
+real = firefox / "Profiles" / "real.default-release"
+assert real.is_dir(), "headless initialization did not create the real profile"
+assert install.choose_profile(None).resolve() == real.resolve()
+created = list((firefox / "Profiles").iterdir())
+assert len(created) == 1 and created[0].name == "real.default-release", created
+PY
+  pass "Python installer initializes Firefox's real macOS profile"
 fi
 
 # Linux: Firefox open, lock file present, --force closes it cleanly.

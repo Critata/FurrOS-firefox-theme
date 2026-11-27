@@ -465,16 +465,30 @@ def command_works(command: list[str]) -> bool:
         return False
 
 
+def macos_firefox_binaries() -> list[Path]:
+    """Firefox binaries in /Applications and the per-user ~/Applications."""
+    home = Path.home()
+    binaries: list[Path] = []
+    for app in (
+        Path("/Applications/Firefox.app"),
+        home / "Applications" / "Firefox.app",
+    ):
+        binary = app / "Contents" / "MacOS" / "firefox"
+        if binary.is_file():
+            binaries.append(binary)
+    return binaries
+
+
 def firefox_ready() -> bool:
+    system = platform.system()
+    if system == "Darwin":
+        for binary in macos_firefox_binaries():
+            if command_works([str(binary)]):
+                return True
+
     for name in ("firefox", "firefox-esr"):
         binary = shutil.which(name)
         if binary and command_works([binary]):
-            return True
-
-    system = platform.system()
-    if system == "Darwin":
-        binary = "/Applications/Firefox.app/Contents/MacOS/firefox"
-        if Path(binary).is_file() and command_works([binary]):
             return True
 
     if system == "Windows":
@@ -764,6 +778,76 @@ def ensure_firefox(skip: bool) -> None:
     print("Firefox installed successfully.")
 
 
+def firefox_launch_command() -> list[str] | None:
+    """Command used to start Firefox once for profile initialization."""
+    override = os.environ.get("FURR_FIREFOX_BIN")
+    if override:
+        path = Path(override)
+        if path.is_file() and os.access(path, os.X_OK):
+            return [str(path)]
+        return None
+
+    system = platform.system()
+    if system == "Darwin":
+        for binary in macos_firefox_binaries():
+            return [str(binary)]
+        return None
+    if system == "Windows":
+        # The PowerShell installer owns Windows profile creation.
+        return None
+
+    for name in ("firefox", "firefox-esr"):
+        found = shutil.which(name)
+        if found:
+            return [found]
+    if shutil.which("flatpak") and command_works(
+        ["flatpak", "run", "org.mozilla.firefox"]
+    ):
+        return ["flatpak", "run", "org.mozilla.firefox"]
+    if shutil.which("snap") and command_works(["snap", "run", "firefox"]):
+        return ["snap", "run", "firefox"]
+    return None
+
+
+def initialize_firefox_profile() -> bool:
+    """Let Firefox create its real default profile and installs.ini.
+
+    Firefox 67+ ignores a hand-written [Profile] Default=1 and creates a
+    dedicated profile on first start. A profile written by the installer
+    would never be used, so the theme would look missing until Firefox is
+    reinstalled. A single headless run avoids that.
+    """
+    command = firefox_launch_command()
+    if not command:
+        return False
+    with tempfile.TemporaryDirectory(prefix="furros-profile-") as tmp:
+        shot = Path(tmp) / "shot.png"
+        print("Initializing the Firefox profile...")
+        try:
+            result = subprocess.run(
+                command
+                + [
+                    "--headless",
+                    "--new-instance",
+                    "--screenshot",
+                    str(shot),
+                    "about:blank",
+                ],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=120,
+            )
+        except Exception:
+            return False
+    if result.returncode != 0:
+        return False
+    # A headless run can leave .parentlock and lock behind after a clean
+    # exit. No Firefox process is alive now, so these locks are stale.
+    clear_stale_profile_locks()
+    wait_for_all_profile_locks()
+    return True
+
+
 def append_ini_sections(path: Path, section: str, body: str) -> None:
     """Append a section only when absent, preserving existing ini content."""
     header = f"[{section}]"
@@ -793,7 +877,7 @@ def next_profile_index(ini: Path) -> int:
     return max(indices) + 1 if indices else 0
 
 
-def create_firefox_profile() -> None:
+def create_firefox_profile(initialize: bool = True) -> None:
     # Reuse a profile previously created by this project: the marker makes
     # repeated runs idempotent without adding another [Profile] section.
     for candidate in candidate_ini_files():
@@ -804,8 +888,14 @@ def create_firefox_profile() -> None:
 
     # Never create a second profile when Firefox already has one in any
     # standard location (including Flatpak and Snap).
-    for candidate in candidate_ini_files():
-        if ini_profile_paths(candidate):
+    if any(ini_profile_paths(candidate) for candidate in candidate_ini_files()):
+        return
+
+    # No profile exists yet. Let Firefox create its real default profile and
+    # installs.ini instead of writing a Default=1 profile that Firefox 67+
+    # ignores. If Firefox cannot be started, fall back to manual creation.
+    if initialize and initialize_firefox_profile():
+        if any(ini_profile_paths(candidate) for candidate in candidate_ini_files()):
             return
 
     system = platform.system()
@@ -848,11 +938,12 @@ def create_firefox_profile() -> None:
     default_path = relative.format(profile_dir=profile_dir)
 
     append_ini_sections(ini, "General", "StartWithLastProfile=1\nVersion=2")
-    # Do not invent an [Install<hash>] section here. Firefox derives the hash
-    # from its own installation directory and creates installs.ini on first
-    # start; a fake hash is ignored (or, worse, migrated by Firefox and later
-    # mistaken for a real default). The legacy [Profile] Default=1 flag is
-    # enough to make Firefox pick this profile on first start.
+    # This is only a fallback for systems where Firefox cannot be started
+    # headlessly. Do not invent an [Install<hash>] section: Firefox derives
+    # the hash from its own installation directory, and a fake hash would be
+    # ignored or migrated later. Modern Firefox may still create its own
+    # profile on first start, which is why the headless initialization above
+    # is preferred.
     append_ini_sections(
         ini,
         f"Profile{next_profile_index(ini)}",
@@ -951,6 +1042,9 @@ def firefox_binary(profile: Path) -> str:
         return "flatpak run org.mozilla.firefox"
     if container == "Snap":
         return "snap run firefox"
+    if platform.system() == "Darwin":
+        for binary in macos_firefox_binaries():
+            return str(binary)
     for name in ("firefox", "firefox-esr"):
         found = shutil.which(name)
         if found:
@@ -1179,13 +1273,9 @@ def get_firefox_version() -> str:
     if platform.system() == "Windows":
         commands = [["firefox.exe", "--version"], ["firefox", "--version"]]
     elif platform.system() == "Darwin":
-        commands.insert(
-            0,
-            [
-                "/Applications/Firefox.app/Contents/MacOS/firefox",
-                "--version",
-            ],
-        )
+        commands = [
+            [str(binary), "--version"] for binary in macos_firefox_binaries()
+        ] + commands
 
     for command in commands:
         try:
@@ -1290,7 +1380,9 @@ def main() -> None:
     handle_running_firefox(args.force)
     clear_stale_profile_locks()
 
-    if not args.uninstall:
+    # A manual --profile is used as-is: do not create or initialize another
+    # profile behind the user's back.
+    if not args.uninstall and not args.profile:
         create_firefox_profile()
     wait_for_all_profile_locks()
 
