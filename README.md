@@ -57,7 +57,7 @@ Start Firefox. The address bar, panels and new tab page should use the FurrOS st
 grep '^Profile:' ~/FurrOS-install-report.txt
 ```
 
-If the UI does not change, open `about:profiles` in Firefox and check that the profile marked **This is the profile in use** matches the report. On Linux and macOS you can also run:
+If the UI does not change, open `about:profiles` in Firefox and check that the profile marked **This is the profile in use** is listed in the report. On macOS the installer themes every profile it can find, so that check is usually unnecessary; restart Firefox after installing. On Linux and macOS you can also run:
 
 ```bash
 ./diagnose.sh
@@ -85,13 +85,15 @@ Backups are kept.
 - All images are embedded in the CSS; there are no external assets or fonts.
 - Run the installer as your desktop user, not with `sudo`/root, unless you really want to change root's profile.
 - On Linux, system Firefox, Snap and Flatpak profiles are detected. With both a system and a Flatpak Firefox, open the browser you actually use before installing, or pass `--profile`.
-- On macOS, profiles live in `~/Library/Application Support/Firefox`; Firefox can be installed in `/Applications` or `~/Applications`.
+- On macOS, profiles live in `~/Library/Application Support/Firefox`; Firefox can be installed in `/Applications` or `~/Applications`. By default the theme is applied to all detected profiles; use `--single-profile` to limit it to the one chosen by Firefox's headless probe.
 - On Windows, `profiles.ini` and `installs.ini` are read from `%APPDATA%\Mozilla\Firefox` and from Microsoft Store/MSIX packages.
 
 ## Options
 
 ```bash
 ./install.sh --profile /full/path/to/profile   # manual profile override
+./install.sh --all-profiles                    # theme every detected profile
+./install.sh --single-profile                  # macOS: only the detected profile
 ./install.sh --firefox-bin /path/to/firefox    # custom binary
 ./install.sh --force                           # close Firefox without asking
 ./install.sh --uninstall                       # remove the theme

@@ -246,6 +246,38 @@ def ini_profile_paths(ini: Path) -> list[Path]:
     return found
 
 
+def ini_install_paths(ini: Path) -> list[Path]:
+    """Profile directories named by stale [Install...]/default entries."""
+    found: list[Path] = []
+    section = ""
+    try:
+        lines = ini.read_text(encoding="utf-8", errors="ignore").splitlines()
+    except OSError:
+        return found
+    for line in lines:
+        stripped = line.strip()
+        if re.fullmatch(r"\[(Install)?[0-9A-Fa-f]+\]", stripped):
+            section = stripped
+            continue
+        key, separator, value = line.partition("=")
+        if not separator or not section or key.strip() != "Default":
+            continue
+        path = Path(os.path.expandvars(value.strip())).expanduser()
+        if not path.is_absolute():
+            path = ini.parent / path
+        if path.is_dir() and path not in found:
+            found.append(path)
+    return found
+
+
+def all_known_profile_paths() -> set[Path]:
+    found: set[Path] = set()
+    for ini in candidate_ini_files():
+        found.update(ini_profile_paths(ini))
+        found.update(ini_install_paths(ini))
+    return found
+
+
 def wait_for_profile_locks(profile: Path, timeout: int = LOCK_TIMEOUT) -> None:
     locks = ("parent.lock", ".parentlock", "lock")
     deadline = time.monotonic() + timeout
@@ -1368,6 +1400,7 @@ def write_report(
     targets: dict[str, Path],
     removed: bool,
     profile_source: str = "",
+    profiles: list[Path] | None = None,
 ) -> Path:
     report = Path.home() / "FurrOS-install-report.txt"
     lines = [
@@ -1378,6 +1411,10 @@ def write_report(
         f"Home:     {Path.home()}",
         f"Source:   {SOURCE}",
         f"Profile:  {profile}",
+    ]
+    for item in profiles or [profile]:
+        lines.append(f"Profile:  {item}")
+    lines += [
         f"Profile source: {profile_source or 'Firefox profile lists'}",
         f"Container:     {profile_container(profile)}",
         f"Firefox:  {get_firefox_version()}",
@@ -1407,6 +1444,16 @@ def main() -> None:
     )
     parser.add_argument("--profile", help="Use this Firefox profile instead of detecting it")
     parser.add_argument(
+        "--all-profiles",
+        action="store_true",
+        help="Apply the theme to every detected Firefox profile",
+    )
+    parser.add_argument(
+        "--single-profile",
+        action="store_true",
+        help="Apply the theme only to the selected profile (macOS)",
+    )
+    parser.add_argument(
         "--firefox-bin",
         metavar="PATH",
         help="Use this Firefox binary (Snap/custom; Flatpak is auto-detected)",
@@ -1423,6 +1470,14 @@ def main() -> None:
         help="Do not install Firefox automatically if missing",
     )
     args = parser.parse_args()
+
+    # On macOS a single wrong profile means the browser shows no change at
+    # all. Theme every local Firefox profile unless the user asked otherwise.
+    all_profiles = args.all_profiles or (
+        platform.system() == "Darwin"
+        and not args.profile
+        and not args.single_profile
+    )
 
     print("FurrOS Firefox theme installer — starting...")
 
@@ -1477,43 +1532,96 @@ def main() -> None:
         profile_source = f"Firefox headless probe ({profile_container(profile)})"
     else:
         profile_source = "Firefox profile lists"
-    targets = destinations(profile)
+    profiles = [profile]
+    if all_profiles:
+        native_root = Path.home() / "Library" / "Application Support" / "Firefox" / "Profiles"
+        candidates = set(all_known_profile_paths())
+        if platform.system() == "Darwin":
+            # Native folders that look like profiles but are not in an ini
+            # entry are still possible targets on macOS.
+            for folder in (native_root, native_root.parent):
+                if not folder.is_dir():
+                    continue
+                for item in folder.iterdir():
+                    if not item.is_dir() or item.name == "Profiles":
+                        continue
+                    if any(
+                        (item / name).exists() for name in ("prefs.js", "user.js", "chrome")
+                    ):
+                        candidates.add(item)
+        for candidate in sorted(candidates):
+            try:
+                resolved = candidate.resolve()
+            except OSError:
+                resolved = candidate
+            if resolved != profile.resolve() and candidate not in profiles:
+                profiles.append(candidate)
+        print(f"Applying the theme to {len(profiles)} Firefox profile(s).")
+
+    all_targets = {str(p): destinations(p) for p in profiles}
+    targets = all_targets[str(profile)]
 
     # Avoid overwriting an existing backup when two runs happen in one second.
     stamp = time.strftime("%Y%m%d-%H%M%S")
-    while any(target.with_name(f"{target.name}.bak-{stamp}").exists() for target in targets.values()):
+    while any(
+        target.with_name(f"{target.name}.bak-{stamp}").exists()
+        for group in all_targets.values()
+        for target in group.values()
+    ):
         time.sleep(1)
         stamp = time.strftime("%Y%m%d-%H%M%S")
 
     if args.uninstall:
-        for target in targets.values():
-            try:
-                target.unlink()
-            except FileNotFoundError:
-                pass
-        report = write_report(profile, None, targets, removed=True, profile_source=profile_source)
-        print(f"\nFurrOS theme removed from: {profile}")
+        for group in all_targets.values():
+            for target in group.values():
+                try:
+                    target.unlink()
+                except FileNotFoundError:
+                    pass
+        report = write_report(
+            profile,
+            None,
+            targets,
+            removed=True,
+            profile_source=profile_source,
+            profiles=profiles,
+        )
+        print(f"\nFurrOS theme removed from {len(profiles)} Firefox profile(s):")
+        for item in profiles:
+            print(f"  {item}")
         print(f"Report saved: {report}")
         print("Start Firefox again to apply the change.")
         return
 
-    for target in targets.values():
-        if target.exists():
-            shutil.copy2(target, target.with_name(f"{target.name}.bak-{stamp}"))
+    for group in all_targets.values():
+        for target in group.values():
+            if target.exists():
+                shutil.copy2(target, target.with_name(f"{target.name}.bak-{stamp}"))
 
     for name in THEME_FILES:
         source = SOURCE / name
         if not source.is_file():
             raise SystemExit(f"Error: missing source file: {source}")
-        target = targets[name]
-        shutil.copy2(source, target)
-        if sha256(source) != sha256(target):
-            raise SystemExit(f"Error: verification failed for {name}")
+        for key, group in all_targets.items():
+            target = group[name]
+            shutil.copy2(source, target)
+            if sha256(source) != sha256(target):
+                raise SystemExit(f"Error: verification failed for {name} in {key}")
 
-    verify_required_pref(targets["user.js"])
+    for group in all_targets.values():
+        verify_required_pref(group["user.js"])
 
-    report = write_report(profile, stamp, targets, removed=False, profile_source=profile_source)
-    print(f"\nFurrOS theme installed in: {profile}")
+    report = write_report(
+        profile,
+        stamp,
+        targets,
+        removed=False,
+        profile_source=profile_source,
+        profiles=profiles,
+    )
+    print(f"\nFurrOS theme installed in {len(profiles)} Firefox profile(s):")
+    for item in profiles:
+        print(f"  {item}")
     print(f"Previous files backed up with suffix .bak-{stamp}")
     print("Verified: all three theme files match the repository.")
     print("Verified: stylesheet preference enabled.")

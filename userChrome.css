@@ -705,25 +705,83 @@ findbar {
   background: var(--furr-surface-2) !important;
 }
 
-/* Window control buttons (when drawn by Firefox) */
-.titlebar-button {
-  border-radius: 8px !important;
+/* --------------------------------------------------------------------------
+   Window controls (Windows and macOS)
+
+   Firefox paints these glyphs from SVG files that use context-stroke. That
+   color is only resolved when -moz-context-properties includes `stroke`;
+   setting `color`/`fill` alone leaves the X, the square and the dash
+   invisible on a dark titlebar. Explicit data: icons keep them visible on
+   every platform, including Firefox's fullscreen control bar.
+   -------------------------------------------------------------------------- */
+#titlebar-buttonbox,
+#titlebar-buttonbox-container,
+#window-controls {
+  color: var(--furr-text) !important;
+  background-color: transparent !important;
+}
+
+.titlebar-button,
+#minimize-button,
+#restore-button,
+#close-button {
+  -moz-appearance: none !important;
+  -moz-context-properties: stroke, fill !important;
   color: var(--furr-text) !important;
   fill: var(--furr-text) !important;
+  stroke: var(--furr-text) !important;
+  border-radius: 8px !important;
+  background-color: transparent !important;
 }
 
 .titlebar-button > .toolbarbutton-icon {
-  fill: var(--furr-text) !important;
+  -moz-context-properties: stroke, fill !important;
   color: var(--furr-text) !important;
+  fill: var(--furr-text) !important;
+  stroke: var(--furr-text) !important;
 }
 
-.titlebar-button:hover {
+/* Minimize: a single horizontal dash. */
+.titlebar-min,
+.titlebar-min > .toolbarbutton-icon,
+#minimize-button {
+  list-style-image: url("data:image/svg+xml,%3Csvg%20xmlns='http://www.w3.org/2000/svg'%20width='16'%20height='16'%20viewBox='0%200%2016%2016'%3E%3Cpath%20d='M3%208h10'%20fill='none'%20stroke='context-stroke'%20stroke-width='1.5'/%3E%3C/svg%3E") !important;
+}
+
+/* Maximize / full screen: an outlined square. */
+.titlebar-max,
+.titlebar-max > .toolbarbutton-icon {
+  list-style-image: url("data:image/svg+xml,%3Csvg%20xmlns='http://www.w3.org/2000/svg'%20width='16'%20height='16'%20viewBox='0%200%2016%2016'%3E%3Cpath%20d='M3.5%203.5h9v9h-9z'%20fill='none'%20stroke='context-stroke'%20stroke-width='1.5'/%3E%3C/svg%3E") !important;
+}
+
+/* Restore: two overlapping squares. Also used by the maximized button. */
+.titlebar-restore,
+.titlebar-restore > .toolbarbutton-icon,
+:root[sizemode="maximized"] .titlebar-max,
+:root[sizemode="maximized"] .titlebar-max > .toolbarbutton-icon,
+#restore-button {
+  list-style-image: url("data:image/svg+xml,%3Csvg%20xmlns='http://www.w3.org/2000/svg'%20width='16'%20height='16'%20viewBox='0%200%2016%2016'%3E%3Cpath%20d='M5%205h8v8H5z%20M3%203h8v2H5v6H3z'%20fill='none'%20stroke='context-stroke'%20stroke-width='1.5'/%3E%3C/svg%3E") !important;
+}
+
+/* Close: the X. */
+.titlebar-close,
+.titlebar-close > .toolbarbutton-icon,
+#close-button {
+  list-style-image: url("data:image/svg+xml,%3Csvg%20xmlns='http://www.w3.org/2000/svg'%20width='16'%20height='16'%20viewBox='0%200%2016%2016'%3E%3Cpath%20d='M4%204l8%208%20M12%204l-8%208'%20fill='none'%20stroke='context-stroke'%20stroke-width='1.5'/%3E%3C/svg%3E") !important;
+}
+
+.titlebar-button:hover,
+#minimize-button:hover,
+#restore-button:hover {
   background: var(--furr-surface-2) !important;
 }
 
-.titlebar-close:hover {
+.titlebar-close:hover,
+#close-button:hover {
   background: var(--furr-red) !important;
   color: var(--furr-paper) !important;
+  fill: var(--furr-paper) !important;
+  stroke: var(--furr-paper) !important;
 }
 
 /* Selection and focus */

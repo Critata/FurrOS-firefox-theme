@@ -21,6 +21,7 @@ MANUAL_PROFILE=0
 FORCE=0
 UNINSTALL=0
 SKIP_FIREFOX_INSTALL=0
+ALL_PROFILES=0
 REPORT="$HOME/FurrOS-install-report.txt"
 REQUIRED_PREF='user_pref("toolkit.legacyUserProfileCustomizations.stylesheets", true);'
 MANAGED_MARKER='.furros-profile'
@@ -56,6 +57,8 @@ Usage: ./install.sh [options]
 
 Options:
   --profile PATH          Use this Firefox profile instead of detecting it
+  --all-profiles          Apply the theme to every detected Firefox profile
+  --single-profile        Apply the theme only to the selected profile (macOS)
   --firefox-bin PATH      Use this Firefox binary (Snap/custom; Flatpak is auto-detected)
   --force                 Close a running Firefox automatically, without asking
   --uninstall             Remove the theme files (backups are kept)
@@ -84,6 +87,14 @@ while [[ $# -gt 0 ]]; do
       export FURR_FIREFOX_BIN="$2"
       shift 2
       ;;
+    --all-profiles)
+      ALL_PROFILES=1
+      shift
+      ;;
+    --single-profile)
+      ALL_PROFILES=0
+      shift
+      ;;
     --force)
       FORCE=1
       shift
@@ -107,6 +118,13 @@ while [[ $# -gt 0 ]]; do
       ;;
   esac
 done
+
+# On macOS a single wrong profile means the browser shows no change at all.
+# Theme every local Firefox profile by default so whichever one Firefox opens
+# is covered. An explicit --profile or --single-profile keeps the old behavior.
+if [[ "$(uname -s)" == "Darwin" && "$MANUAL_PROFILE" -eq 0 && "$ALL_PROFILES" -eq 0 ]]; then
+  ALL_PROFILES=1
+fi
 
 echo "FurrOS Firefox theme installer — starting..."
 
@@ -248,6 +266,45 @@ ini_profile_paths() {
     fi
     [[ -d "$path" ]] && printf '%s\n' "$path"
   done < "$ini"
+}
+
+# Paths listed in [Install...] / bare installation sections. Unlike Path=
+# entries these can be stale, so they are not normal profile candidates, but
+# they are still real Firefox profile directories that may be opened by a
+# launcher using an older installation hash. On macOS we theme them too.
+ini_install_paths() {
+  local ini="$1" base line key value path section=""
+  [[ -f "$ini" ]] || return 0
+  base="$(cd "$(dirname "$ini")" && pwd -P)"
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    line="$(trim "$line")"
+    if [[ "$line" =~ ^\[(Install)?[[:xdigit:]]+\]$ ]]; then
+      section="$line"
+      continue
+    fi
+    [[ "$line" == *=* ]] || continue
+    key="$(trim "${line%%=*}")"
+    value="$(trim "${line#*=}")"
+    [[ -n "$section" && "$key" == "Default" ]] || continue
+    if [[ "$value" == /* ]]; then
+      path="$value"
+    else
+      path="$base/$value"
+    fi
+    [[ -d "$path" ]] && printf '%s\n' "$path"
+  done < "$ini"
+}
+
+all_known_profile_paths() {
+  local ini path
+  while IFS= read -r ini; do
+    while IFS= read -r path; do
+      printf '%s\n' "$path"
+    done < <(ini_profile_paths "$ini")
+    while IFS= read -r path; do
+      printf '%s\n' "$path"
+    done < <(ini_install_paths "$ini")
+  done < <(profile_ini_candidates)
 }
 
 managed_profiles_in_ini() {
@@ -1292,6 +1349,35 @@ fi
 
 CHROME="$PROFILE/chrome"
 
+# On macOS even a careful profile probe can be defeated by a launcher that
+# opens a different profile. Theme every registered profile, plus any native
+# profile folder Firefox created without a standard ini entry. The selected
+# profile stays first so the report and messages remain useful.
+TARGETS=("$PROFILE")
+add_target() {
+  local candidate="$1" existing
+  [[ -n "$candidate" && -d "$candidate" ]] || return 0
+  for existing in "${TARGETS[@]}"; do
+    [[ "$existing" == "$candidate" ]] && return 0
+  done
+  TARGETS+=("$candidate")
+}
+if [[ "$ALL_PROFILES" -eq 1 ]]; then
+  while IFS= read -r candidate; do
+    add_target "$candidate"
+  done < <(all_known_profile_paths)
+  if [[ "$(uname -s)" == "Darwin" ]]; then
+    for candidate in "$HOME/Library/Application Support/Firefox/Profiles"/* \
+                     "$HOME/Library/Application Support/Firefox"/*; do
+      [[ -d "$candidate" ]] || continue
+      [[ "$(basename "$candidate")" == "Profiles" ]] && continue
+      [[ -f "$candidate/prefs.js" || -f "$candidate/user.js" || -d "$candidate/chrome" ]] || continue
+      add_target "$candidate"
+    done
+  fi
+  echo "Applying the theme to ${#TARGETS[@]} Firefox profile(s)."
+fi
+
 if [[ "$MANUAL_PROFILE" -eq 1 ]]; then
   PROFILE_SOURCE="manual --profile"
 elif is_active_profile "$PROFILE"; then
@@ -1304,13 +1390,23 @@ fi
 
 # Final guard immediately before any write: a profile can be locked by a
 # Firefox instance that started while the installer was running.
-wait_for_profile_locks "$PROFILE" || exit 1
+for target in "${TARGETS[@]}"; do
+  wait_for_profile_locks "$target" || exit 1
+done
 
 # Avoid overwriting an existing backup when two runs happen in one second.
 TS="$(date +%Y%m%d-%H%M%S)"
-while [[ -e "$PROFILE/user.js.bak-$TS" \
-  || -e "$CHROME/userChrome.css.bak-$TS" \
-  || -e "$CHROME/userContent.css.bak-$TS" ]]; do
+while :; do
+  collision=0
+  for target in "${TARGETS[@]}"; do
+    if [[ -e "$target/user.js.bak-$TS" \
+      || -e "$target/chrome/userChrome.css.bak-$TS" \
+      || -e "$target/chrome/userContent.css.bak-$TS" ]]; then
+      collision=1
+      break
+    fi
+  done
+  [[ "$collision" -eq 0 ]] && break
   sleep 1
   TS="$(date +%Y%m%d-%H%M%S)"
 done
@@ -1335,16 +1431,18 @@ version() {
 
 if [[ "$UNINSTALL" -eq 1 ]]; then
   REMOVED=()
-  for f in userChrome.css userContent.css; do
-    if [[ -f "$CHROME/$f" ]]; then
-      rm -f "$CHROME/$f"
-      REMOVED+=("$CHROME/$f")
+  for target in "${TARGETS[@]}"; do
+    for f in userChrome.css userContent.css; do
+      if [[ -f "$target/chrome/$f" ]]; then
+        rm -f "$target/chrome/$f"
+        REMOVED+=("$target/chrome/$f")
+      fi
+    done
+    if [[ -f "$target/user.js" ]]; then
+      rm -f "$target/user.js"
+      REMOVED+=("$target/user.js")
     fi
   done
-  if [[ -f "$PROFILE/user.js" ]]; then
-    rm -f "$PROFILE/user.js"
-    REMOVED+=("$PROFILE/user.js")
-  fi
   {
     echo "FurrOS Firefox theme installation report"
     echo "Date:     $(date)"
@@ -1353,6 +1451,9 @@ if [[ "$UNINSTALL" -eq 1 ]]; then
     echo "Home:     $HOME"
     echo "Source:   $SRC"
     echo "Profile:  $PROFILE"
+    for target in "${TARGETS[@]}"; do
+      echo "Profile:  $target"
+    done
     echo "Profile source: ${PROFILE_SOURCE:-automatic}"
     echo "Container:     $(profile_container "$PROFILE")"
     echo "Firefox:  $(version)"
@@ -1373,30 +1474,33 @@ if [[ "$UNINSTALL" -eq 1 ]]; then
   exit 0
 fi
 
-mkdir -p "$CHROME"
+for target in "${TARGETS[@]}"; do
+  target_chrome="$target/chrome"
+  mkdir -p "$target_chrome"
 
-for f in userChrome.css userContent.css; do
-  if [[ -f "$CHROME/$f" ]]; then
-    cp -p "$CHROME/$f" "$CHROME/$f.bak-$TS"
+  for f in userChrome.css userContent.css; do
+    if [[ -f "$target_chrome/$f" ]]; then
+      cp -p "$target_chrome/$f" "$target_chrome/$f.bak-$TS"
+    fi
+  done
+  if [[ -f "$target/user.js" ]]; then
+    cp -p "$target/user.js" "$target/user.js.bak-$TS"
   fi
-done
-if [[ -f "$PROFILE/user.js" ]]; then
-  cp -p "$PROFILE/user.js" "$PROFILE/user.js.bak-$TS"
-fi
 
-for f in userChrome.css userContent.css; do
-  [[ -f "$SRC/$f" ]] || { echo "Error: missing source file: $SRC/$f" >&2; exit 1; }
-  cp "$SRC/$f" "$CHROME/$f"
-  cmp -s "$SRC/$f" "$CHROME/$f" || { echo "Error: copy failed for $f" >&2; exit 1; }
-done
+  for f in userChrome.css userContent.css; do
+    [[ -f "$SRC/$f" ]] || { echo "Error: missing source file: $SRC/$f" >&2; exit 1; }
+    cp "$SRC/$f" "$target_chrome/$f"
+    cmp -s "$SRC/$f" "$target_chrome/$f" || { echo "Error: copy failed for $f in $target" >&2; exit 1; }
+  done
 
-[[ -f "$SRC/user.js" ]] || { echo "Error: missing source file: $SRC/user.js" >&2; exit 1; }
-cp "$SRC/user.js" "$PROFILE/user.js"
-cmp -s "$SRC/user.js" "$PROFILE/user.js" || { echo "Error: copy failed for user.js" >&2; exit 1; }
-grep -Fq "$REQUIRED_PREF" "$PROFILE/user.js" || {
-  echo "Error: user.js is missing the required stylesheet preference." >&2
-  exit 1
-}
+  [[ -f "$SRC/user.js" ]] || { echo "Error: missing source file: $SRC/user.js" >&2; exit 1; }
+  cp "$SRC/user.js" "$target/user.js"
+  cmp -s "$SRC/user.js" "$target/user.js" || { echo "Error: copy failed for user.js in $target" >&2; exit 1; }
+  grep -Fq "$REQUIRED_PREF" "$target/user.js" || {
+    echo "Error: user.js is missing the required stylesheet preference in $target." >&2
+    exit 1
+  }
+done
 
 {
   echo "FurrOS Firefox theme installation report"
@@ -1406,20 +1510,28 @@ grep -Fq "$REQUIRED_PREF" "$PROFILE/user.js" || {
   echo "Home:     $HOME"
   echo "Source:   $SRC"
   echo "Profile:  $PROFILE"
+  for target in "${TARGETS[@]}"; do
+    echo "Profile:  $target"
+  done
   echo "Profile source: ${PROFILE_SOURCE:-automatic}"
   echo "Container:     $(profile_container "$PROFILE")"
   echo "Firefox:  $(version)"
   echo "Firefox binary: $(firefox_binary)"
   echo "Backup:   .bak-$TS"
   echo "Action:   Install"
-  echo "Verified: $CHROME/userChrome.css"
-  echo "Verified: $CHROME/userContent.css"
-  echo "Verified: $PROFILE/user.js"
+  for target in "${TARGETS[@]}"; do
+    echo "Verified: $target/chrome/userChrome.css"
+    echo "Verified: $target/chrome/userContent.css"
+    echo "Verified: $target/user.js"
+  done
   echo "Verified: stylesheet preference enabled"
 } > "$REPORT"
 
 echo
-echo "FurrOS theme installed in: $PROFILE"
+echo "FurrOS theme installed in ${#TARGETS[@]} Firefox profile(s):"
+for target in "${TARGETS[@]}"; do
+  echo "  $target"
+done
 echo "Previous files backed up with suffix .bak-$TS"
 echo "Verified: all three theme files match the repository."
 echo "Verified: stylesheet preference enabled."

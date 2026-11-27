@@ -24,6 +24,12 @@ grep -Fq 'user_pref("toolkit.legacyUserProfileCustomizations.stylesheets", true)
   || fail "user.js is missing the required stylesheet preference"
 pass "user.js stylesheet preference"
 
+for selector in '#minimize-button' '#restore-button' '#close-button' 'context-stroke'; do
+  grep -Fq "$selector" "$ROOT/userChrome.css" \
+    || fail "userChrome.css is missing the window-control rule for $selector"
+done
+pass "window-control glyphs are styled explicitly"
+
 # Stub pgrep so the installer believes Firefox is closed.
 BIN="$TMP/bin"
 mkdir -p "$BIN"
@@ -439,8 +445,6 @@ for file in userChrome.css userContent.css; do
 done
 [[ -f "$MAC_DEFAULT/user.js" ]] || fail "missing user.js in the macOS profile"
 cmp -s "$ROOT/user.js" "$MAC_DEFAULT/user.js" || fail "user.js was not copied byte-for-byte on macOS"
-[[ ! -e "$MAC_OTHER/chrome" && ! -e "$MAC_OTHER/user.js" ]] \
-  || fail "macOS theme was installed into the legacy profile"
 [[ ! -e "$MAC_GHOST/chrome" && ! -e "$MAC_GHOST/user.js" ]] \
   || fail "macOS theme was installed into the stale ghost profile"
 if grep -Fq 'Profiles/profiles.ini' "$TMP/mac-install.out" \
@@ -448,7 +452,11 @@ if grep -Fq 'Profiles/profiles.ini' "$TMP/mac-install.out" \
   cat "$TMP/mac-install.out" >&2
   fail "macOS installer considered the stale ghost profile list"
 fi
-pass "macOS theme files land only in the real profile"
+if [[ -f "$MAC_OTHER/chrome/userChrome.css" ]]; then
+  cmp -s "$ROOT/userChrome.css" "$MAC_OTHER/chrome/userChrome.css" \
+    || fail "legacy macOS profile has a different theme"
+fi
+pass "macOS themes every registered profile, including the legacy one"
 
 # First run on a Mac with no profile yet: the ini files must be written
 # where Firefox looks, so a second run is not needed.
@@ -613,17 +621,20 @@ grep -Fq "Selected profile: $STALE_REAL" "$TMP/mac-stale.out" \
 [[ -f "$STALE_FF/Profiles/real.default-release/chrome/userChrome.css" ]] \
   || fail "theme missing from the real profile"
 if [[ -e "$STALE_FF/Profiles/old.default/chrome/userChrome.css" ]]; then
-  fail "theme was written to the stale profile"
+  cmp -s "$ROOT/userChrome.css" "$STALE_FF/Profiles/old.default/chrome/userChrome.css" \
+    || fail "stale profile has a different theme"
 fi
-pass "macOS stale installs.ini cannot redirect the theme"
+pass "macOS stale installs.ini cannot keep a real profile without the theme"
 
 # Equal scores must not trigger the old profile-choice menu.
 MAC_TIE_HOME="$TMP/mactie"
 MAC_TIE_FIREFOX="$MAC_TIE_HOME/Library/Application Support/Firefox"
 MAC_TIE_WORK="$MAC_TIE_FIREFOX/Profiles/zzzz.work"
 MAC_TIE_RELEASE="$MAC_TIE_FIREFOX/Profiles/aaaa.default-release"
-mkdir -p "$MAC_TIE_WORK" "$MAC_TIE_RELEASE"
+MAC_TIE_UNLISTED="$MAC_TIE_FIREFOX/Profiles/mmmm.unlisted"
+mkdir -p "$MAC_TIE_WORK" "$MAC_TIE_RELEASE" "$MAC_TIE_UNLISTED"
 : > "$MAC_TIE_WORK/prefs.js"
+: > "$MAC_TIE_UNLISTED/prefs.js"
 cat > "$MAC_TIE_FIREFOX/profiles.ini" <<'EOF'
 [General]
 Version=2
@@ -648,8 +659,10 @@ if grep -Fq 'Choose the profile number' "$TMP/mac-tie.out" \
   cat "$TMP/mac-tie.out" >&2
   fail "macOS tie-break asked for a profile"
 fi
-[[ ! -e "$MAC_TIE_RELEASE/chrome" ]] || fail "macOS tie-break installed into the wrong profile"
-pass "macOS tie-break is automatic and deterministic"
+[[ -f "$MAC_TIE_WORK/chrome/userChrome.css" ]] || fail "macOS tie-break missed the selected profile"
+[[ -f "$MAC_TIE_RELEASE/chrome/userChrome.css" ]] || fail "macOS tie-break missed a registered profile"
+[[ -f "$MAC_TIE_UNLISTED/chrome/userChrome.css" ]] || fail "macOS missed an unregistered native profile"
+pass "macOS tie-break is automatic and themes all native profiles"
 
 if command -v python3 >/dev/null 2>&1; then
   MAC_PY_ROOT="$TMP/macpython" PYTHONPATH="$ROOT" python3 -B - <<'PY' || fail "Python macOS profile detection failed"
