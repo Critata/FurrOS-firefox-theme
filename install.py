@@ -40,6 +40,12 @@ FIREFOX_CMD_PATTERN = re.compile(
     r"(?:^|/)(?:firefox|firefox-bin|firefox-esr|org\.mozilla\.firefox)(?:\s|$)"
     r"|/Mozilla/Firefox/|/snap/firefox/|/org\.mozilla\.firefox/"
 )
+# pgrep(1) uses POSIX extended regex on macOS and does not understand the
+# non-capturing groups or \s from the Python pattern above.
+PGREP_FIREFOX_PATTERN = (
+    r"(^|/)(firefox|firefox-bin|firefox-esr|org\.mozilla\.firefox)([[:space:]]|$)"
+    r"|/Mozilla/Firefox/|/snap/firefox/|/org\.mozilla\.firefox/"
+)
 
 
 def sha256(path: Path) -> str:
@@ -215,9 +221,10 @@ def firefox_pids() -> list[int]:
             found.update(int(value) for value in output.split() if value.isdigit())
         try:
             output = subprocess.check_output(
-                ["pgrep", "-f", FIREFOX_CMD_PATTERN.pattern],
+                ["pgrep", "-f", PGREP_FIREFOX_PATTERN],
                 text=True,
                 errors="ignore",
+                stderr=subprocess.DEVNULL,
                 timeout=10,
             )
             found.update(int(value) for value in output.split() if value.isdigit())
@@ -493,15 +500,23 @@ def command_works(command: list[str]) -> bool:
         return False
 
 
+def macos_app_roots() -> list[Path]:
+    """Application folders to search for Firefox.app on macOS.
+
+    FURR_MACOS_APPLICATIONS is a colon-separated override used by the test
+    suite and by managed Macs that keep Firefox outside /Applications.
+    """
+    override = os.environ.get("FURR_MACOS_APPLICATIONS")
+    if override:
+        return [Path(item) for item in override.split(os.pathsep) if item]
+    return [Path("/Applications"), Path.home() / "Applications"]
+
+
 def macos_firefox_binaries() -> list[Path]:
     """Firefox binaries in /Applications and the per-user ~/Applications."""
-    home = Path.home()
     binaries: list[Path] = []
-    for app in (
-        Path("/Applications/Firefox.app"),
-        home / "Applications" / "Firefox.app",
-    ):
-        binary = app / "Contents" / "MacOS" / "firefox"
+    for root in macos_app_roots():
+        binary = root / "Firefox.app" / "Contents" / "MacOS" / "firefox"
         if binary.is_file():
             binaries.append(binary)
     return binaries

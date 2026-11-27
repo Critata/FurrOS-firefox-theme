@@ -14,6 +14,16 @@ fail() { printf 'FAIL - %s\n' "$1" >&2; exit 1; }
 bash -n "$ROOT/install.sh" || fail "install.sh has a syntax error"
 pass "install.sh syntax"
 
+# macOS ships Bash 3.2, where "${empty[@]}" aborts under set -u. Every array
+# expansion must use the ${arr[@]+"${arr[@]}"} form.
+if grep -Eq '(^|[^+])"\$\{[A-Za-z_][A-Za-z0-9_]*\[@\]\}"' \
+  "$ROOT/install.sh" "$ROOT/diagnose.sh"; then
+  grep -En '(^|[^+])"\$\{[A-Za-z_][A-Za-z0-9_]*\[@\]\}"' \
+    "$ROOT/install.sh" "$ROOT/diagnose.sh" >&2
+  fail "an empty array expansion is not safe on macOS Bash 3.2"
+fi
+pass "array expansions are safe on macOS Bash 3.2"
+
 if command -v python3 >/dev/null 2>&1; then
   python3 -B -c "import ast, pathlib; ast.parse(pathlib.Path('$ROOT/install.py').read_text(encoding='utf-8'))" \
     || fail "install.py has a syntax error"
@@ -36,8 +46,11 @@ mkdir -p "$BIN"
 printf '#!/bin/sh\nexit 1\n' > "$BIN/pgrep"
 printf '#!/bin/sh\nexit 1\n' > "$BIN/flatpak"
 printf '#!/bin/sh\nexit 1\n' > "$BIN/snap"
+# Pin the platform so the Linux scenarios behave identically on macOS,
+# where install.sh deliberately themes every profile by default.
+printf '#!/bin/sh\necho Linux\n' > "$BIN/uname"
 printf '#!/bin/sh\necho "Mozilla Firefox 161.0"\n' > "$BIN/fake-firefox"
-chmod +x "$BIN/pgrep" "$BIN/flatpak" "$BIN/snap" "$BIN/fake-firefox"
+chmod +x "$BIN/pgrep" "$BIN/flatpak" "$BIN/snap" "$BIN/uname" "$BIN/fake-firefox"
 
 HOME_DIR="$TMP/home"
 BASE="$HOME_DIR/.config/mozilla/firefox"
@@ -168,6 +181,9 @@ import install
 home = Path(os.environ["HOME"])
 base = home / ".config/mozilla/firefox"
 expected = base / "j9l0uwbk.default-release"
+# The shell scenario above is pinned to Linux; do the same here so the
+# Python installer reads ~/.config even when the suite runs on macOS.
+install.platform.system = lambda: "Linux"
 chosen = install.choose_profile(None)
 assert chosen == expected, (chosen, expected)
 install.create_firefox_profile()
@@ -470,7 +486,8 @@ FIRST_PROFILES="$FIRST_FIREFOX/Profiles"
 CREATED=""
 for item in "$FIRST_PROFILES"/*.default-release; do
   [[ -d "$item" ]] || continue
-  CREATED="$item"
+  # Resolve /var -> /private/var on macOS, matching the installer's pwd -P.
+  CREATED="$(cd "$item" && pwd -P)"
 done
 [[ -n "$CREATED" ]] || { cat "$TMP/mac-first.out" >&2; fail "first macOS install created no profile"; }
 CREATED_COUNT="$(find "$FIRST_PROFILES" -mindepth 1 -maxdepth 1 -type d | wc -l | tr -d '[:space:]')"
@@ -538,6 +555,7 @@ printf '#!/bin/sh\nexit 1\n' > "$MAC_APP_BIN/firefox"
 chmod +x "$MAC_APP_BIN/uname" "$MAC_APP_BIN/pgrep" "$MAC_APP_BIN/firefox"
 
 HOME="$MAC_APP_HOME" PATH="$MAC_APP_BIN:$PATH" \
+  FURR_MACOS_APPLICATIONS="$MAC_APP_HOME/Applications" \
   "$ROOT/install.sh" </dev/null > "$TMP/mac-app.out" 2>&1 \
   || { cat "$TMP/mac-app.out" >&2; fail "macOS ~/Applications install failed"; }
 
@@ -610,6 +628,7 @@ Locked=1
 INI
 
 HOME="$MAC_STALE_HOME" PATH="$TMP/macstalebin:$PATH" \
+  FURR_MACOS_APPLICATIONS="$MAC_STALE_HOME/Applications" \
   "$ROOT/install.sh" </dev/null > "$TMP/mac-stale.out" 2>&1 \
   || { cat "$TMP/mac-stale.out" >&2; fail "macOS stale installs.ini install failed"; }
 
@@ -633,6 +652,10 @@ MAC_TIE_WORK="$MAC_TIE_FIREFOX/Profiles/zzzz.work"
 MAC_TIE_RELEASE="$MAC_TIE_FIREFOX/Profiles/aaaa.default-release"
 MAC_TIE_UNLISTED="$MAC_TIE_FIREFOX/Profiles/mmmm.unlisted"
 mkdir -p "$MAC_TIE_WORK" "$MAC_TIE_RELEASE" "$MAC_TIE_UNLISTED"
+# macOS reports /var as /private/var; compare against resolved paths.
+MAC_TIE_WORK="$(cd "$MAC_TIE_WORK" && pwd -P)"
+MAC_TIE_RELEASE="$(cd "$MAC_TIE_RELEASE" && pwd -P)"
+MAC_TIE_UNLISTED="$(cd "$MAC_TIE_UNLISTED" && pwd -P)"
 : > "$MAC_TIE_WORK/prefs.js"
 : > "$MAC_TIE_UNLISTED/prefs.js"
 cat > "$MAC_TIE_FIREFOX/profiles.ini" <<'EOF'
@@ -877,7 +900,8 @@ trap 'rm -f "$FAKE_LOCK"; exit 0' TERM
 : > "$FAKE_LOCK"
 while :; do sleep 0.2; done
 EOF
-chmod +x "$RUN_BIN/pgrep" "$RUN_BIN/fake-firefox"
+printf '#!/bin/sh\necho Linux\n' > "$RUN_BIN/uname"
+chmod +x "$RUN_BIN/pgrep" "$RUN_BIN/uname" "$RUN_BIN/fake-firefox"
 
 RUN_HOME="$TMP/runhome"
 RUN_PROFILE="$RUN_HOME/.config/mozilla/firefox/abcd1234.default-release"

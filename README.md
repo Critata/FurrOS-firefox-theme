@@ -26,7 +26,7 @@ cd /path/to/FurrOS-firefox-theme
 bash ./install.command
 ```
 
-The Terminal window stays open when the installer finishes, so you can read the result. If it closes too fast, run `bash ./install.command` from Terminal. If macOS blocks the file, right-click it and choose **Open**. Intel and Apple Silicon are both supported.
+The Terminal window stays open when the installer finishes, so you can read the result. If it closes too fast, run `bash ./install.command` from Terminal. If macOS blocks the file, right-click it and choose **Open**. Intel and Apple Silicon are both supported. The installer works with macOS's built-in Bash 3.2 as well as newer Bash releases.
 
 ### Windows
 
@@ -85,7 +85,7 @@ Backups are kept.
 - All images are embedded in the CSS; there are no external assets or fonts.
 - Run the installer as your desktop user, not with `sudo`/root, unless you really want to change root's profile.
 - On Linux, system Firefox, Snap and Flatpak profiles are detected. With both a system and a Flatpak Firefox, open the browser you actually use before installing, or pass `--profile`.
-- On macOS, profiles live in `~/Library/Application Support/Firefox`; Firefox can be installed in `/Applications` or `~/Applications`. By default the theme is applied to all detected profiles; use `--single-profile` to limit it to the one chosen by Firefox's headless probe.
+- On macOS, profiles live in `~/Library/Application Support/Firefox`; Firefox can be installed in `/Applications` or `~/Applications`. By default the theme is applied to all detected profiles; use `--single-profile` to limit it to the one chosen by Firefox's headless probe. Set `FURR_MACOS_APPLICATIONS` to a colon-separated list of application folders to search for `Firefox.app` outside those two locations.
 - On Windows, `profiles.ini` and `installs.ini` are read from `%APPDATA%\Mozilla\Firefox` and from Microsoft Store/MSIX packages.
 
 ## Options
@@ -107,7 +107,7 @@ Backups are kept.
 ./tests/run-tests.sh
 ```
 
-The suite runs offline and does not touch a real profile. It covers Linux, simulated macOS and simulated Windows/WSL detection, first-run profile creation, launcher behavior, Flatpak/Store paths, stale locks and byte-for-byte copies. Real end-to-end runs on macOS Intel/Apple Silicon and Windows still need a manual check.
+The suite runs offline and does not touch a real profile. It covers Linux, simulated macOS and simulated Windows/WSL detection, first-run profile creation, launcher behavior, Flatpak/Store paths, stale locks and byte-for-byte copies. It is also runnable with macOS's Bash 3.2. The theme has been checked end-to-end on macOS Apple Silicon; macOS Intel and Windows still need a manual check.
 
 ## Release
 

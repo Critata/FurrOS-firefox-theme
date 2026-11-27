@@ -36,7 +36,8 @@ SEEN_INIS=()
 add_ini() {
   [[ -f "$1" ]] || return 0
   local seen
-  for seen in "${SEEN_INIS[@]}"; do
+  # Bash 3.2 on macOS needs the ${arr[@]+...} form for empty arrays under set -u.
+  for seen in ${SEEN_INIS[@]+"${SEEN_INIS[@]}"}; do
     [[ "$seen" == "$1" ]] && return 0
   done
   SEEN_INIS+=("$1")
@@ -69,7 +70,7 @@ if [[ "$WSL" -eq 1 ]] && command -v cmd.exe >/dev/null 2>&1 && command -v wslpat
   fi
 fi
 
-for INI in "${SEEN_INIS[@]}"; do
+for INI in ${SEEN_INIS[@]+"${SEEN_INIS[@]}"}; do
   echo "  $INI"
   # Show every section: installs.ini uses bare [<hash>] names, profiles.ini
   # uses [Install<hash>], and both matter for profile selection.
@@ -83,22 +84,44 @@ echo
 
 echo "Profile used by running Firefox (if any):"
 FOUND=0
-for LINK in /proc/[0-9]*/fd/*; do
-  [[ -L "$LINK" ]] || continue
-  TARGET="$(readlink "$LINK" 2>/dev/null)" || continue
-  case "$TARGET" in
-    */mozilla/firefox/*|*/Mozilla/Firefox/Profiles/*)
-      case "$TARGET" in
-        */.cache/*) continue ;;
-      esac
-      if [[ -f "${TARGET%/*}/prefs.js" ]]; then
-        echo "  ${TARGET%/*}"
-        FOUND=1
-        break
-      fi
-      ;;
-  esac
-done
+if [[ "$(uname -s)" == "Darwin" ]]; then
+  # macOS has no /proc. Firefox helper processes carry "-profile <path>" in
+  # their command line, which is the profile the running browser really uses.
+  while IFS= read -r CMD; do
+    case "$CMD" in
+      *"-profile "*) ;;
+      *) continue ;;
+    esac
+    PROFILE_PATH="${CMD#*-profile }"
+    PROFILE_PATH="${PROFILE_PATH%% org.mozilla.*}"
+    PROFILE_PATH="${PROFILE_PATH%% --*}"
+    case "$PROFILE_PATH" in
+      */Mozilla/Firefox/Profiles/*|*/Firefox/Profiles/*|*/mozilla/firefox/*) ;;
+      *) continue ;;
+    esac
+    [[ -d "$PROFILE_PATH" ]] || continue
+    echo "  $PROFILE_PATH"
+    FOUND=1
+    break
+  done < <(ps -Aww -o command= 2>/dev/null | grep -F -- '-profile ' || true)
+else
+  for LINK in /proc/[0-9]*/fd/*; do
+    [[ -L "$LINK" ]] || continue
+    TARGET="$(readlink "$LINK" 2>/dev/null)" || continue
+    case "$TARGET" in
+      */mozilla/firefox/*|*/Mozilla/Firefox/Profiles/*)
+        case "$TARGET" in
+          */.cache/*) continue ;;
+        esac
+        if [[ -f "${TARGET%/*}/prefs.js" ]]; then
+          echo "  ${TARGET%/*}"
+          FOUND=1
+          break
+        fi
+        ;;
+    esac
+  done
+fi
 [[ "$FOUND" -eq 1 ]] || echo "  none"
 echo
 

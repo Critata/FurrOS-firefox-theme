@@ -198,7 +198,9 @@ firefox_pids() {
 
   # pgrep -f and ps also see this installer and its ancestors when a path or
   # argument contains "firefox". Never signal our own process tree.
-  for pid in "${found[@]}"; do
+  # Bash 3.2 (macOS /bin/bash) treats an empty array expansion as an unbound
+  # variable under `set -u`; the ${arr[@]+...} form expands to nothing.
+  for pid in ${found[@]+"${found[@]}"}; do
     is_own_process_tree "$pid" && continue
     if [[ -d "/proc/$pid" ]]; then
       if [[ -r "/proc/$pid/stat" ]]; then
@@ -359,7 +361,7 @@ ACTIVE_PROFILES=()
 
 is_active_profile() {
   local active
-  for active in "${ACTIVE_PROFILES[@]-}"; do
+  for active in ${ACTIVE_PROFILES[@]+"${ACTIVE_PROFILES[@]}"}; do
     [[ "$active" == "$1" ]] && return 0
   done
   return 1
@@ -371,7 +373,7 @@ capture_active_profiles() {
   pids="$(firefox_pids)" || return 0
   [[ -n "$pids" ]] || return 0
   read -ra pids <<< "$pids"
-  for pid in "${pids[@]}"; do
+  for pid in ${pids[@]+"${pids[@]}"}; do
     for link in /proc/"$pid"/fd/*; do
       [[ -L "$link" ]] || continue
       target="$(readlink "$link" 2>/dev/null)" || continue
@@ -488,10 +490,10 @@ handle_running_firefox() {
   fi
 
   echo "Closing Firefox cleanly (SIGTERM)..."
-  kill -TERM "${pid_array[@]}" 2>/dev/null || true
+  kill -TERM ${pid_array[@]+"${pid_array[@]}"} 2>/dev/null || true
   for ((i = 0; i < FIREFOX_CLOSE_TIMEOUT * 5; i++)); do
     remaining=""
-    for pid in "${pid_array[@]}"; do
+    for pid in ${pid_array[@]+"${pid_array[@]}"}; do
       process_alive "$pid" && remaining+=" $pid"
     done
     # Snap and Flatpak launchers can leave children behind: pick up any new
@@ -499,9 +501,9 @@ handle_running_firefox() {
     newpids="$(firefox_pids)"
     if [[ -n "$newpids" ]]; then
       read -ra new_array <<< "$newpids"
-      for pid in "${new_array[@]}"; do
+      for pid in ${new_array[@]+"${new_array[@]}"}; do
         known=0
-        for existing in "${pid_array[@]}"; do
+        for existing in ${pid_array[@]+"${pid_array[@]}"}; do
           if [[ "$existing" == "$pid" ]]; then
             known=1
             break
@@ -520,10 +522,10 @@ handle_running_firefox() {
   if [[ -n "$remaining" || -n "$newpids" ]]; then
     echo "Warning: Firefox did not exit within ${FIREFOX_CLOSE_TIMEOUT}s. Forcing termination (SIGKILL)." >&2
     read -ra remaining_array <<< "$remaining $newpids"
-    kill -KILL "${remaining_array[@]}" 2>/dev/null || true
+    kill -KILL ${remaining_array[@]+"${remaining_array[@]}"} 2>/dev/null || true
     for ((i = 0; i < FIREFOX_KILL_TIMEOUT * 5; i++)); do
       remaining=""
-      for pid in "${remaining_array[@]}"; do
+      for pid in ${remaining_array[@]+"${remaining_array[@]}"}; do
         process_alive "$pid" && remaining+=" $pid"
       done
       [[ -z "$remaining" ]] && break
@@ -547,14 +549,20 @@ handle_running_firefox() {
 # in ~/Applications. Finder-based installs and some managed Macs use the
 # per-user location, so both are checked before falling back to PATH.
 macos_firefox_binaries() {
-  local app
-  for app in \
-    "/Applications/Firefox.app" \
-    "$HOME/Applications/Firefox.app"; do
-    if [[ -x "$app/Contents/MacOS/firefox" ]]; then
-      printf '%s\n' "$app/Contents/MacOS/firefox"
+  local root roots old_ifs
+  # Colon-separated application folders. The override keeps tests away from
+  # a real /Applications/Firefox.app and supports managed Macs that install
+  # Firefox somewhere else.
+  roots="${FURR_MACOS_APPLICATIONS:-/Applications:$HOME/Applications}"
+  old_ifs="$IFS"
+  IFS=':'
+  for root in $roots; do
+    [[ -n "$root" ]] || continue
+    if [[ -x "$root/Firefox.app/Contents/MacOS/firefox" ]]; then
+      printf '%s\n' "$root/Firefox.app/Contents/MacOS/firefox"
     fi
   done
+  IFS="$old_ifs"
   return 0
 }
 
@@ -715,7 +723,7 @@ initialize_firefox_profile() {
   before="$(all_registered_paths)"
   tmp="$(mktemp -d)"
   echo "Checking which Firefox profile is used..."
-  "${FIREFOX_LAUNCH[@]}" --headless --new-instance \
+  ${FIREFOX_LAUNCH[@]+"${FIREFOX_LAUNCH[@]}"} --headless --new-instance \
     --screenshot "$tmp/shot.png" about:blank >/dev/null 2>&1 &
   pid=$!
   for ((i = 0; i < 1200; i++)); do
@@ -746,7 +754,7 @@ initialize_firefox_profile() {
   leftovers="$(firefox_pids)"
   if [[ -n "$leftovers" ]]; then
     read -ra leftover_pids <<< "$leftovers"
-    kill -TERM "${leftover_pids[@]}" 2>/dev/null || true
+    kill -TERM ${leftover_pids[@]+"${leftover_pids[@]}"} 2>/dev/null || true
     for ((i = 0; i < 50; i++)); do
       [[ -z "$(firefox_pids)" ]] && break
       sleep 0.1
@@ -754,7 +762,7 @@ initialize_firefox_profile() {
     leftovers="$(firefox_pids)"
     if [[ -n "$leftovers" ]]; then
       read -ra leftover_pids <<< "$leftovers"
-      kill -KILL "${leftover_pids[@]}" 2>/dev/null || true
+      kill -KILL ${leftover_pids[@]+"${leftover_pids[@]}"} 2>/dev/null || true
       sleep 0.5
     fi
   fi
@@ -1162,7 +1170,7 @@ INSTALL_DEFAULTS=()
 add_ini() {
   local existing
   [[ -f "$1" ]] || return 0
-  for existing in "${INIS[@]}"; do
+  for existing in ${INIS[@]+"${INIS[@]}"}; do
     [[ "$existing" == "$1" ]] && return 0
   done
   INIS+=("$1")
@@ -1173,7 +1181,7 @@ add_profile() {
   local flag="$1" name="$2" path="$3" existing
   [[ -d "$path" ]] || return 0
   if [[ ${#PROFILES[@]} -gt 0 ]]; then
-    for existing in "${PROFILES[@]}"; do
+    for existing in ${PROFILES[@]+"${PROFILES[@]}"}; do
       if [[ "${existing##*$'\t'}" == "$path" ]]; then
         return 0
       fi
@@ -1273,7 +1281,7 @@ if [[ -z "$PROFILE" ]]; then
     add_ini "$candidate"
   done < <(profile_ini_candidates)
 
-  for ini in "${INIS[@]}"; do
+  for ini in ${INIS[@]+"${INIS[@]}"}; do
     echo "Found profile list: $ini"
     parse_ini "$ini"
   done
@@ -1293,14 +1301,14 @@ if [[ -z "$PROFILE" ]]; then
   # automatically: FurrOS-managed, initialized, default-release, then the
   # lexicographically first path. Never prompt.
   SCORED=()
-  for entry in "${PROFILES[@]}"; do
+  for entry in ${PROFILES[@]+"${PROFILES[@]}"}; do
     flag="${entry%%$'\t'*}"
     rest="${entry#*$'\t'}"
     path="${rest##*$'\t'}"
 
     score=1
     [[ "$flag" == "1" ]] && score=2
-    for default_path in "${INSTALL_DEFAULTS[@]}"; do
+    for default_path in ${INSTALL_DEFAULTS[@]+"${INSTALL_DEFAULTS[@]}"}; do
       [[ "$default_path" == "$path" ]] && score=3
     done
     # The running profile wins even when another installation's [Install]
@@ -1332,7 +1340,7 @@ if [[ -z "$PROFILE" ]]; then
     SCORED+=("$score"$'\t'"$managed"$'\t'"$established"$'\t'"$preferred"$'\t'"$path")
   done
 
-  BEST="$(printf '%s\n' "${SCORED[@]}" \
+  BEST="$(printf '%s\n' ${SCORED[@]+"${SCORED[@]}"} \
     | LC_ALL=C sort -t $'\t' -k1,1nr -k2,2nr -k3,3nr -k4,4nr -k5,5 \
     | sed -n '1p')"
   PROFILE="${BEST##*$'\t'}"
@@ -1358,12 +1366,15 @@ CHROME="$PROFILE/chrome"
 # profile stays first so the report and messages remain useful.
 TARGETS=("$PROFILE")
 add_target() {
-  local candidate="$1" existing
+  local candidate="$1" existing resolved
   [[ -n "$candidate" && -d "$candidate" ]] || return 0
-  for existing in "${TARGETS[@]}"; do
-    [[ "$existing" == "$candidate" ]] && return 0
+  # Resolve /var -> /private/var and similar symlinks so the same profile
+  # cannot be added twice through two different path spellings.
+  resolved="$(cd "$candidate" 2>/dev/null && pwd -P)" || return 0
+  for existing in ${TARGETS[@]+"${TARGETS[@]}"}; do
+    [[ "$existing" == "$resolved" ]] && return 0
   done
-  TARGETS+=("$candidate")
+  TARGETS+=("$resolved")
 }
 if [[ "$ALL_PROFILES" -eq 1 ]]; then
   while IFS= read -r candidate; do
@@ -1393,7 +1404,7 @@ fi
 
 # Final guard immediately before any write: a profile can be locked by a
 # Firefox instance that started while the installer was running.
-for target in "${TARGETS[@]}"; do
+for target in ${TARGETS[@]+"${TARGETS[@]}"}; do
   wait_for_profile_locks "$target" || exit 1
 done
 
@@ -1401,7 +1412,7 @@ done
 TS="$(date +%Y%m%d-%H%M%S)"
 while :; do
   collision=0
-  for target in "${TARGETS[@]}"; do
+  for target in ${TARGETS[@]+"${TARGETS[@]}"}; do
     if [[ -e "$target/user.js.bak-$TS" \
       || -e "$target/chrome/userChrome.css.bak-$TS" \
       || -e "$target/chrome/userContent.css.bak-$TS" ]]; then
@@ -1434,7 +1445,7 @@ version() {
 
 if [[ "$UNINSTALL" -eq 1 ]]; then
   REMOVED=()
-  for target in "${TARGETS[@]}"; do
+  for target in ${TARGETS[@]+"${TARGETS[@]}"}; do
     for f in userChrome.css userContent.css; do
       if [[ -f "$target/chrome/$f" ]]; then
         rm -f "$target/chrome/$f"
@@ -1454,7 +1465,7 @@ if [[ "$UNINSTALL" -eq 1 ]]; then
     echo "Home:     $HOME"
     echo "Source:   $SRC"
     echo "Profile:  $PROFILE"
-    for target in "${TARGETS[@]}"; do
+    for target in ${TARGETS[@]+"${TARGETS[@]}"}; do
       echo "Profile:  $target"
     done
     echo "Profile source: ${PROFILE_SOURCE:-automatic}"
@@ -1465,7 +1476,7 @@ if [[ "$UNINSTALL" -eq 1 ]]; then
     if [[ ${#REMOVED[@]} -eq 0 ]]; then
       echo "Removed:  nothing (no theme files were present)"
     else
-      for f in "${REMOVED[@]}"; do
+      for f in ${REMOVED[@]+"${REMOVED[@]}"}; do
         echo "Removed:  $f"
       done
     fi
@@ -1477,7 +1488,7 @@ if [[ "$UNINSTALL" -eq 1 ]]; then
   exit 0
 fi
 
-for target in "${TARGETS[@]}"; do
+for target in ${TARGETS[@]+"${TARGETS[@]}"}; do
   target_chrome="$target/chrome"
   mkdir -p "$target_chrome"
 
@@ -1513,7 +1524,7 @@ done
   echo "Home:     $HOME"
   echo "Source:   $SRC"
   echo "Profile:  $PROFILE"
-  for target in "${TARGETS[@]}"; do
+  for target in ${TARGETS[@]+"${TARGETS[@]}"}; do
     echo "Profile:  $target"
   done
   echo "Profile source: ${PROFILE_SOURCE:-automatic}"
@@ -1522,7 +1533,7 @@ done
   echo "Firefox binary: $(firefox_binary)"
   echo "Backup:   .bak-$TS"
   echo "Action:   Install"
-  for target in "${TARGETS[@]}"; do
+  for target in ${TARGETS[@]+"${TARGETS[@]}"}; do
     echo "Verified: $target/chrome/userChrome.css"
     echo "Verified: $target/chrome/userContent.css"
     echo "Verified: $target/user.js"
@@ -1532,7 +1543,7 @@ done
 
 echo
 echo "FurrOS theme installed in ${#TARGETS[@]} Firefox profile(s):"
-for target in "${TARGETS[@]}"; do
+for target in ${TARGETS[@]+"${TARGETS[@]}"}; do
   echo "  $target"
 done
 echo "Previous files backed up with suffix .bak-$TS"
