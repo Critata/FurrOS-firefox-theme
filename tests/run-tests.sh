@@ -40,6 +40,14 @@ for selector in '#minimize-button' '#restore-button' '#close-button' 'context-st
 done
 pass "window-control glyphs are styled explicitly"
 
+# Windows paints the titlebar controls with Segoe Fluent Icons. The global
+# toolbarbutton font rule must not replace it, or the buttons become empty
+# boxes showing E921/E922/E8BB.
+grep -Fq '@media (-moz-platform: windows)' "$ROOT/userChrome.css" \
+  && grep -Fq 'Segoe Fluent Icons' "$ROOT/userChrome.css" \
+  || fail "Windows titlebar controls lost their icon font"
+pass "Windows titlebar controls keep Segoe Fluent Icons"
+
 # Stub pgrep so the installer believes Firefox is closed.
 BIN="$TMP/bin"
 mkdir -p "$BIN"

@@ -741,6 +741,17 @@ findbar {
   stroke: var(--furr-text) !important;
 }
 
+/* Windows draws the minimize/maximize/close glyphs with Segoe Fluent Icons
+   through a ::before pseudo-element. The global `toolbarbutton` font rule
+   above would replace that icon font with Nunito, leaving the buttons as
+   empty boxes (or missing-glyph squares). Restore the icon font only on
+   Windows; Linux and macOS draw these controls as images instead. */
+@media (-moz-platform: windows) {
+  .titlebar-button {
+    font-family: "Segoe Fluent Icons", "Segoe MDL2 Assets" !important;
+  }
+}
+
 /* Minimize: a single horizontal dash. */
 .titlebar-min,
 .titlebar-min > .toolbarbutton-icon,
