@@ -16,11 +16,15 @@ FURR_NO_PAUSE=1 bash ./install.sh "$@"
 status=$?
 
 echo
-if [[ "$status" -eq 0 ]]; then
-  echo "FurrOS theme installed successfully."
-else
+if [[ "$status" -ne 0 ]]; then
   echo "FurrOS installation failed (exit $status)."
   echo "Review the messages above, then run ./install.sh from Terminal for details."
+elif [[ $# -eq 0 ]]; then
+  echo "FurrOS theme installed successfully."
+elif [[ "${1:-}" == "--uninstall" ]]; then
+  echo "FurrOS theme removed successfully."
+elif [[ "${1:-}" != "-h" && "${1:-}" != "--help" ]]; then
+  echo "FurrOS installer finished successfully."
 fi
 
 # Finder closes the Terminal window as soon as the shell exits. Pause only

@@ -334,6 +334,20 @@ LAUNCH_STATUS=0
 [[ "$LAUNCH_STATUS" -eq 0 ]] || fail "install.command failed on a successful install"
 grep -Fq 'FurrOS theme installed successfully.' "$TMP/launcher-ok.out" \
   || fail "install.command did not confirm success"
+
+cat > "$LAUNCH_DIR/install.sh" <<'EOF'
+#!/usr/bin/env bash
+echo "usage output"
+exit 0
+EOF
+chmod +x "$LAUNCH_DIR/install.sh"
+LAUNCH_STATUS=0
+( cd / && bash "$LAUNCH_DIR/install.command" --help </dev/null > "$TMP/launcher-help.out" 2>&1 ) \
+  || LAUNCH_STATUS=$?
+[[ "$LAUNCH_STATUS" -eq 0 ]] || fail "install.command failed on --help"
+if grep -Fq 'installed successfully' "$TMP/launcher-help.out"; then
+  fail "install.command claims an install after --help"
+fi
 if grep -Fq 'exec bash' "$ROOT/install.command"; then
   fail "install.command uses exec and closes the Terminal window too early"
 fi
