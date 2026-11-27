@@ -32,6 +32,8 @@ FIREFOX_CLOSE_TIMEOUT = 15
 FIREFOX_KILL_TIMEOUT = 5
 LOCK_TIMEOUT = 15
 ACTIVE_PROFILES: set[Path] = set()
+BOOT_PROFILE: Path | None = None
+PROBE_DONE = False
 # Match names and full command lines; the latter catches Flatpak, Snap and
 # custom binaries without matching this installer's own path.
 FIREFOX_CMD_PATTERN = re.compile(
@@ -252,9 +254,11 @@ def wait_for_profile_locks(profile: Path, timeout: int = LOCK_TIMEOUT) -> None:
         if not present:
             return
         if time.monotonic() >= deadline:
+            pids = firefox_pids()
             raise SystemExit(
                 f"Error: Firefox lock file still present in {profile} after {timeout}s: "
                 + ", ".join(present)
+                + f"\nRunning Firefox processes: {', '.join(str(pid) for pid in pids)}"
                 + "\nTerminate Firefox completely, then run the installer again."
             )
         time.sleep(0.2)
@@ -282,7 +286,11 @@ def any_firefox_running() -> bool:
 
 
 def clear_stale_profile_locks() -> None:
-    """Drop lock files whose owning Firefox process is no longer alive."""
+    """Drop every lock once no Firefox process is visible.
+
+    The PID stored in a lock cannot be trusted: it may have been reused by an
+    unrelated process. Checking it would leave a real lock in place forever.
+    """
     if any_firefox_running():
         return
     for ini in candidate_ini_files():
@@ -291,20 +299,8 @@ def clear_stale_profile_locks() -> None:
                 lock = profile / name
                 if not (lock.exists() or lock.is_symlink()):
                     continue
-                if lock.is_symlink():
-                    try:
-                        target = os.readlink(lock)
-                    except OSError:
-                        continue
-                else:
-                    try:
-                        target = lock.read_text(encoding="utf-8", errors="ignore")[:128]
-                    except OSError:
-                        continue
-                match = re.search(r":\+?(\d+)$", target)
-                pid = int(match.group(1)) if match else None
-                if pid is not None and process_alive(pid):
-                    continue
+                if any_firefox_running():
+                    return
                 print(f"Removing stale profile lock: {lock}")
                 try:
                     lock.unlink()
@@ -809,22 +805,36 @@ def firefox_launch_command() -> list[str] | None:
     return None
 
 
-def initialize_firefox_profile() -> bool:
-    """Let Firefox create its real default profile and installs.ini.
+def all_registered_paths() -> set[Path]:
+    """Profile directories registered in any ini file."""
+    found: set[Path] = set()
+    for ini in candidate_ini_files():
+        found.update(ini_profile_paths(ini))
+    return found
 
-    Firefox 67+ ignores a hand-written [Profile] Default=1 and creates a
-    dedicated profile on first start. A profile written by the installer
-    would never be used, so the theme would look missing until Firefox is
-    reinstalled. A single headless run avoids that.
+
+def initialize_firefox_profile() -> bool:
+    """Ask Firefox itself which profile it opens, then record it.
+
+    The ini files can be stale: installs.ini may still carry the hash of an
+    older app location, and profiles.ini may point at a profile Firefox no
+    longer uses. Firefox 67+ also ignores a hand-written [Profile] Default=1
+    and creates a different profile on first start. A single headless run
+    with the binary we found exposes the real profile through its lock file.
     """
+    global BOOT_PROFILE, PROBE_DONE
+    PROBE_DONE = True
     command = firefox_launch_command()
     if not command:
         return False
+
+    before = all_registered_paths()
+    found: Path | None = None
     with tempfile.TemporaryDirectory(prefix="furros-profile-") as tmp:
         shot = Path(tmp) / "shot.png"
-        print("Initializing the Firefox profile...")
+        print("Checking which Firefox profile is used...")
         try:
-            result = subprocess.run(
+            proc = subprocess.Popen(
                 command
                 + [
                     "--headless",
@@ -835,16 +845,66 @@ def initialize_firefox_profile() -> bool:
                 ],
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
-                timeout=120,
             )
-        except Exception:
+        except OSError:
             return False
-    if result.returncode != 0:
-        return False
-    # A headless run can leave .parentlock and lock behind after a clean
-    # exit. No Firefox process is alive now, so these locks are stale.
+
+        for _ in range(1200):
+            for path in all_registered_paths():
+                for name in ("parent.lock", ".parentlock", "lock"):
+                    lock = path / name
+                    if lock.exists() or lock.is_symlink():
+                        found = path
+                        break
+                if found is not None:
+                    break
+            if found is not None or proc.poll() is not None:
+                break
+            time.sleep(0.1)
+
+        if proc.poll() is None:
+            # A lock was seen early, so the polling loop stopped before
+            # Firefox finished. Wait for a clean exit instead of killing it
+            # and leaving its lock behind.
+            try:
+                proc.wait(timeout=120)
+            except subprocess.TimeoutExpired:
+                proc.terminate()
+                try:
+                    proc.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    proc.wait()
+                return False
+        if proc.returncode != 0:
+            return False
+
+    # The headless process can leave short-lived children behind. Firefox
+    # was closed before the probe started, so anything still running belongs
+    # to the probe and must be stopped before a lock can be treated as stale.
+    leftovers = firefox_pids()
+    if leftovers:
+        terminate_processes(leftovers, signal.SIGTERM)
+        for _ in range(50):
+            if not firefox_pids():
+                break
+            time.sleep(0.1)
+        leftovers = firefox_pids()
+        if leftovers:
+            terminate_processes(leftovers, signal.SIGKILL)
+            time.sleep(0.5)
+    # A headless run can leave lock files behind after a clean exit. No
+    # Firefox process is alive now, so those locks are stale.
     clear_stale_profile_locks()
     wait_for_all_profile_locks()
+    if found is None:
+        # A first run creates the real profile and registers it in the ini.
+        new_paths = all_registered_paths() - before
+        if len(new_paths) == 1:
+            found = next(iter(new_paths))
+    if found is not None:
+        BOOT_PROFILE = found
+        print(f"Firefox opened profile: {BOOT_PROFILE}")
     return True
 
 
@@ -891,10 +951,11 @@ def create_firefox_profile(initialize: bool = True) -> None:
     if any(ini_profile_paths(candidate) for candidate in candidate_ini_files()):
         return
 
-    # No profile exists yet. Let Firefox create its real default profile and
-    # installs.ini instead of writing a Default=1 profile that Firefox 67+
-    # ignores. If Firefox cannot be started, fall back to manual creation.
-    if initialize and initialize_firefox_profile():
+    # No profile exists yet and the headless probe did not run. Let Firefox
+    # create its real default profile and installs.ini instead of writing a
+    # Default=1 profile that Firefox 67+ ignores. If Firefox cannot be
+    # started, fall back to manual creation.
+    if initialize and not PROBE_DONE and initialize_firefox_profile():
         if any(ini_profile_paths(candidate) for candidate in candidate_ini_files()):
             return
 
@@ -1163,6 +1224,7 @@ def choose_profile(
     specified: str | None,
     running: Path | None = None,
     active: set[Path] | None = None,
+    boot: Path | None = None,
 ) -> Path:
     if specified:
         path = Path(os.path.expandvars(specified)).expanduser()
@@ -1209,12 +1271,24 @@ def choose_profile(
         except OSError:
             active_resolved.add(running)
 
+    boot_resolved: Path | None = None
+    if boot is not None:
+        try:
+            boot_resolved = boot.resolve()
+        except OSError:
+            boot_resolved = boot
+
     def score(item: dict[str, object]) -> int:
         # The profile open at startup wins: with both system and Flatpak
         # Firefox installed, the [Install] default alone can point at the
         # wrong container.
-        if Path(item["resolved"]) in active_resolved:
+        resolved = Path(item["resolved"])
+        if resolved in active_resolved:
             return 5
+        # The profile Firefox opened with the binary we found is the ground
+        # truth. On macOS there is no /proc, so nothing outranks it there.
+        if boot_resolved is not None and resolved == boot_resolved:
+            return 6 if not active_resolved else 4
         if item["install_default"]:
             return 3
         if item["legacy_default"]:
@@ -1380,17 +1454,27 @@ def main() -> None:
     handle_running_firefox(args.force)
     clear_stale_profile_locks()
 
-    # A manual --profile is used as-is: do not create or initialize another
-    # profile behind the user's back.
+    # A manual --profile is used as-is: do not probe or create another
+    # profile behind the user's back. Otherwise ask Firefox itself which
+    # profile it opens before trusting the ini files: macOS has no /proc,
+    # and an outdated installs.ini can point at a profile Firefox ignores.
     if not args.uninstall and not args.profile:
+        try:
+            initialize_firefox_profile()
+        except SystemExit:
+            raise
+        except Exception:
+            pass
         create_firefox_profile()
     wait_for_all_profile_locks()
 
-    profile = choose_profile(args.profile, active=ACTIVE_PROFILES)
+    profile = choose_profile(args.profile, active=ACTIVE_PROFILES, boot=BOOT_PROFILE)
     if args.profile:
         profile_source = "manual --profile"
     elif any(item.resolve() == profile.resolve() for item in ACTIVE_PROFILES):
         profile_source = f"running Firefox ({profile_container(profile)})"
+    elif BOOT_PROFILE is not None and profile.resolve() == BOOT_PROFILE.resolve():
+        profile_source = f"Firefox headless probe ({profile_container(profile)})"
     else:
         profile_source = "Firefox profile lists"
     targets = destinations(profile)

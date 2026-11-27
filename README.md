@@ -26,7 +26,7 @@ cd /path/to/FurrOS-firefox-theme
 bash ./install.command
 ```
 
-The Terminal window stays open when the installer finishes, so you can read the result. If macOS blocks the file, right-click it and choose **Open**. Intel and Apple Silicon are both supported.
+The Terminal window stays open when the installer finishes, so you can read the result. If it closes too fast, run `bash ./install.command` from Terminal. If macOS blocks the file, right-click it and choose **Open**. Intel and Apple Silicon are both supported.
 
 ### Windows
 
@@ -43,7 +43,7 @@ If Firefox has never been started on this Windows account, open it once and clos
 
 1. Finds Firefox, or installs it if it is missing.
 2. Closes a running Firefox safely: `SIGTERM` first, `SIGKILL` only after a timeout, then waits for the profile locks.
-3. Finds the profile Firefox actually uses. On Linux and macOS, if Firefox has no profile yet, it starts Firefox once in headless mode so the real default profile and `installs.ini` are created. This avoids the old problem where Firefox ignored the installer's profile and created a different one on first launch.
+3. Finds the profile Firefox actually uses. On Linux and macOS it starts Firefox once in headless mode and identifies the profile from the lock file it creates, so an outdated `installs.ini` or a first-run profile cannot send the theme to the wrong place. This fixes the old problem where the theme only worked after uninstalling Firefox.
 4. Backs up existing `userChrome.css`, `userContent.css` and `user.js` as `.bak-DATE-TIME`, copies the theme and verifies it byte-for-byte.
 5. Writes `~/FurrOS-install-report.txt` with the selected profile, container and Firefox binary.
 

@@ -380,6 +380,7 @@ wait_for_profile_locks() {
     [[ -z "$found" ]] && return 0
     if (( i >= seconds * 5 )); then
       echo "Error: Firefox lock file still present in $profile after ${seconds}s:${found}" >&2
+      echo "Running Firefox processes: $(firefox_pids)" >&2
       echo "Terminate Firefox completely, then run the installer again." >&2
       return 1
     fi
@@ -628,27 +629,93 @@ run_with_timeout() {
   return 1
 }
 
-# Modern Firefox (67+) ignores a hand-written [Profile] Default=1 and creates
-# its own dedicated profile on first start. A profile created by the installer
-# would therefore never be used and the theme would look missing until Firefox
-# is reinstalled. Starting Firefox once in headless mode lets Firefox create
-# the real default profile and installs.ini; the theme is then installed into
-# the profile Firefox will actually open.
+# The profile Firefox really opens is the only reliable answer on macOS:
+# installs.ini can contain a hash from an older app location, and profiles.ini
+# can still point at a profile that Firefox no longer uses. Starting Firefox
+# once in headless mode with the very same binary exposes that profile through
+# its lock file. The ini files alone are not enough.
+BOOT_PROFILE=""
+PROBE_DONE=0
+
+all_registered_paths() {
+  local ini path
+  while IFS= read -r ini; do
+    [[ -f "$ini" ]] || continue
+    while IFS= read -r path; do
+      printf '%s\n' "$path"
+    done < <(ini_profile_paths "$ini")
+  done < <(profile_ini_candidates)
+}
+
 initialize_firefox_profile() {
-  local tmp
+  local tmp pid state i path lock found="" before leftovers
+  local -a leftover_pids=()
+  PROBE_DONE=1
   firefox_launch_command || return 1
+  before="$(all_registered_paths)"
   tmp="$(mktemp -d)"
-  echo "Initializing the Firefox profile..."
-  if ! run_with_timeout 120 "${FIREFOX_LAUNCH[@]}" \
-    --headless --new-instance --screenshot "$tmp/shot.png" about:blank; then
+  echo "Checking which Firefox profile is used..."
+  "${FIREFOX_LAUNCH[@]}" --headless --new-instance \
+    --screenshot "$tmp/shot.png" about:blank >/dev/null 2>&1 &
+  pid=$!
+  for ((i = 0; i < 1200; i++)); do
+    # A lock file belongs to the profile this Firefox instance opened.
+    while IFS= read -r path; do
+      [[ -n "$path" ]] || continue
+      for lock in parent.lock .parentlock lock; do
+        if [[ -e "$path/$lock" || -L "$path/$lock" ]]; then
+          found="$path"
+          break 2
+        fi
+      done
+    done < <(all_registered_paths)
+    state="$(ps -o stat= -p "$pid" 2>/dev/null | tr -d '[:space:]')" || state=""
+    if [[ -z "$state" || "$state" == Z* ]]; then
+      break
+    fi
+    sleep 0.1
+  done
+  if ! wait "$pid" 2>/dev/null; then
     rm -rf "$tmp"
     return 1
   fi
   rm -rf "$tmp"
-  # A headless run can leave .parentlock and lock behind even after a clean
-  # exit. No Firefox process is alive now, so these locks are stale.
-  clear_stale_profile_locks
+  # The headless process can leave short-lived children behind. Firefox was
+  # closed before the probe started, so anything still running belongs to the
+  # probe and must be stopped before a lock can be treated as stale.
+  leftovers="$(firefox_pids)"
+  if [[ -n "$leftovers" ]]; then
+    read -ra leftover_pids <<< "$leftovers"
+    kill -TERM "${leftover_pids[@]}" 2>/dev/null || true
+    for ((i = 0; i < 50; i++)); do
+      [[ -z "$(firefox_pids)" ]] && break
+      sleep 0.1
+    done
+    leftovers="$(firefox_pids)"
+    if [[ -n "$leftovers" ]]; then
+      read -ra leftover_pids <<< "$leftovers"
+      kill -KILL "${leftover_pids[@]}" 2>/dev/null || true
+      sleep 0.5
+    fi
+  fi
+  # A headless run can leave lock files behind even after a clean exit. No
+  # Firefox process is alive now, so those locks are stale.
+  clear_stale_profile_locks || true
   wait_for_all_profile_locks || return 1
+  if [[ -z "$found" ]]; then
+    # A first run creates the real profile and registers it in the ini files.
+    while IFS= read -r path; do
+      [[ -n "$path" ]] || continue
+      if [[ $'\n'"$before"$'\n' != *$'\n'"$path"$'\n'* ]]; then
+        found="$path"
+        break
+      fi
+    done < <(all_registered_paths)
+  fi
+  if [[ -n "$found" ]]; then
+    BOOT_PROFILE="$found"
+    echo "Firefox opened profile: $BOOT_PROFILE"
+  fi
   return 0
 }
 
@@ -945,12 +1012,15 @@ create_firefox_profile() {
     return 0
   fi
 
-  # No profile exists yet. Let Firefox create its real default profile and
-  # installs.ini instead of writing a Default=1 profile that Firefox 67+
-  # ignores. If Firefox cannot be started (for example under WSL when only
-  # the Windows browser exists), fall back to the manual profile below.
-  if initialize_firefox_profile && has_registered_profile; then
-    return 0
+  # No profile exists yet and the headless probe did not run. Let Firefox
+  # create its real default profile and installs.ini instead of writing a
+  # Default=1 profile that Firefox 67+ ignores. If Firefox cannot be started
+  # (for example under WSL when only the Windows browser exists), fall back
+  # to the manual profile below.
+  if [[ "$PROBE_DONE" -eq 0 ]]; then
+    if initialize_firefox_profile && has_registered_profile; then
+      return 0
+    fi
   fi
 
   os="$(uname -s)"
@@ -1012,9 +1082,12 @@ capture_active_profiles
 handle_running_firefox || exit 1
 clear_stale_profile_locks
 
-# A manual --profile is used as-is: do not create or initialize another
-# profile behind the user's back.
+# A manual --profile is used as-is: do not probe or create another profile
+# behind the user's back. Otherwise ask Firefox itself which profile it opens
+# before reading the ini files; on macOS the running instance cannot be
+# inspected through /proc, and an outdated installs.ini can be misleading.
 if [[ "$UNINSTALL" -ne 1 && -z "$PROFILE" ]]; then
+  initialize_firefox_profile || true
   create_firefox_profile
 fi
 
@@ -1151,9 +1224,10 @@ if [[ -z "$PROFILE" ]]; then
     exit 1
   fi
 
-  # Score: 5 = profile that was open when installation started (this is what
-  # distinguishes Flatpak from a system Firefox install), 3 = Firefox
-  # [Install] default, 2 = legacy [Profile] Default=1, 1 = other profile.
+  # Score: 6 = profile Firefox opened during the headless probe, 5 = profile
+  # that was open when installation started (this is what distinguishes
+  # Flatpak from a system Firefox install), 3 = Firefox [Install] default,
+  # 2 = legacy [Profile] Default=1, 1 = other profile.
   # The active profile was recorded before Firefox was closed and is only
   # considered when it is registered in an ini file. Ties are resolved
   # automatically: FurrOS-managed, initialized, default-release, then the
@@ -1173,6 +1247,17 @@ if [[ -z "$PROFILE" ]]; then
     # section sorts first (a common Flatpak + system Firefox setup).
     if is_active_profile "$path"; then
       score=5
+    fi
+    # The profile Firefox just opened with the binary we found is the ground
+    # truth. On macOS there is no /proc, so nothing outranks it there; on
+    # Linux a profile that was open when the installer started still wins.
+    if [[ -n "$BOOT_PROFILE" && "$path" == "$BOOT_PROFILE" ]] \
+      && ! is_active_profile "$path"; then
+      if [[ ${#ACTIVE_PROFILES[@]} -eq 0 ]]; then
+        score=6
+      else
+        score=4
+      fi
     fi
 
     managed=0
@@ -1211,6 +1296,8 @@ if [[ "$MANUAL_PROFILE" -eq 1 ]]; then
   PROFILE_SOURCE="manual --profile"
 elif is_active_profile "$PROFILE"; then
   PROFILE_SOURCE="running Firefox ($(profile_container "$PROFILE"))"
+elif [[ -n "$BOOT_PROFILE" && "$PROFILE" == "$BOOT_PROFILE" ]]; then
+  PROFILE_SOURCE="Firefox headless probe ($(profile_container "$PROFILE"))"
 else
   PROFILE_SOURCE="Firefox profile lists"
 fi

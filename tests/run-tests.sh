@@ -537,8 +537,8 @@ MAC_REAL="$MAC_APP_HOME/Library/Application Support/Firefox/Profiles/real.defaul
 MAC_REAL_EXPECTED="$(cd "$MAC_REAL" && pwd -P)"
 grep -Fq "Selected profile: $MAC_REAL_EXPECTED" "$TMP/mac-app.out" \
   || { cat "$TMP/mac-app.out" >&2; fail "macOS ~/Applications profile was not selected"; }
-grep -Fq 'Initializing the Firefox profile' "$TMP/mac-app.out" \
-  || fail "installer did not initialize the real Firefox profile"
+grep -Fq 'Checking which Firefox profile is used' "$TMP/mac-app.out" \
+  || fail "installer did not ask Firefox which profile it uses"
 if grep -Fq 'Created Firefox profile' "$TMP/mac-app.out"; then
   fail "installer wrote a manual profile instead of using Firefox's profile"
 fi
@@ -547,6 +547,75 @@ fi
 [[ -f "$MAC_APP_HOME/Library/Application Support/Firefox/installs.ini" ]] \
   || fail "headless initialization did not create installs.ini"
 pass "macOS ~/Applications Firefox is found and its real profile is used"
+
+# A stale installs.ini can point at a profile Firefox no longer opens (for
+# example after the app was moved). The headless probe must win over those
+# entries: the lock file identifies the profile this Firefox really uses.
+MAC_STALE_HOME="$TMP/macstale"
+MAC_STALE_DIR="$MAC_STALE_HOME/Applications/Firefox.app/Contents/MacOS"
+mkdir -p "$MAC_STALE_DIR" "$TMP/macstalebin"
+cat > "$MAC_STALE_DIR/firefox" <<'EOF'
+#!/bin/sh
+if [ "${1:-}" = "--version" ]; then
+  echo "Mozilla Firefox 161.0"
+  exit 0
+fi
+FF="$HOME/Library/Application Support/Firefox"
+LOCK="$FF/Profiles/real.default-release/.parentlock"
+: > "$LOCK"
+sleep 1
+rm -f "$LOCK"
+exit 0
+EOF
+chmod +x "$MAC_STALE_DIR/firefox"
+printf '#!/bin/sh\necho Darwin\n' > "$TMP/macstalebin/uname"
+printf '#!/bin/sh\nexit 1\n' > "$TMP/macstalebin/pgrep"
+printf '#!/bin/sh\nexit 1\n' > "$TMP/macstalebin/firefox"
+chmod +x "$TMP/macstalebin/uname" "$TMP/macstalebin/pgrep" "$TMP/macstalebin/firefox"
+
+STALE_FF="$MAC_STALE_HOME/Library/Application Support/Firefox"
+mkdir -p "$STALE_FF/Profiles/old.default" "$STALE_FF/Profiles/real.default-release"
+cat > "$STALE_FF/profiles.ini" <<'INI'
+[General]
+StartWithLastProfile=1
+Version=2
+
+[Profile0]
+Name=old
+IsRelative=1
+Path=Profiles/old.default
+Default=1
+
+[Profile1]
+Name=default-release
+IsRelative=1
+Path=Profiles/real.default-release
+
+[Install4F96D1932A9F858E]
+Default=Profiles/old.default
+Locked=1
+INI
+cat > "$STALE_FF/installs.ini" <<'INI'
+[4F96D1932A9F858E]
+Default=Profiles/old.default
+Locked=1
+INI
+
+HOME="$MAC_STALE_HOME" PATH="$TMP/macstalebin:$PATH" \
+  "$ROOT/install.sh" </dev/null > "$TMP/mac-stale.out" 2>&1 \
+  || { cat "$TMP/mac-stale.out" >&2; fail "macOS stale installs.ini install failed"; }
+
+STALE_REAL="$(cd "$STALE_FF/Profiles/real.default-release" && pwd -P)"
+grep -Fq "Firefox opened profile: $STALE_REAL" "$TMP/mac-stale.out" \
+  || { cat "$TMP/mac-stale.out" >&2; fail "headless probe did not find the real profile"; }
+grep -Fq "Selected profile: $STALE_REAL" "$TMP/mac-stale.out" \
+  || { cat "$TMP/mac-stale.out" >&2; fail "stale installs.ini won over the real profile"; }
+[[ -f "$STALE_FF/Profiles/real.default-release/chrome/userChrome.css" ]] \
+  || fail "theme missing from the real profile"
+if [[ -e "$STALE_FF/Profiles/old.default/chrome/userChrome.css" ]]; then
+  fail "theme was written to the stale profile"
+fi
+pass "macOS stale installs.ini cannot redirect the theme"
 
 # Equal scores must not trigger the old profile-choice menu.
 MAC_TIE_HOME="$TMP/mactie"
@@ -713,6 +782,40 @@ created = list((firefox / "Profiles").iterdir())
 assert len(created) == 1 and created[0].name == "real.default-release", created
 PY
   pass "Python installer initializes Firefox's real macOS profile"
+fi
+
+if command -v python3 >/dev/null 2>&1; then
+  MAC_PY_BOOT="$TMP/macpyboot" PYTHONPATH="$ROOT" python3 -B - <<'PY' || fail "Python installer ignored the Firefox boot profile"
+import os
+from pathlib import Path
+import install
+
+root = Path(os.environ["MAC_PY_BOOT"])
+home = root / "home"
+home.mkdir(parents=True, exist_ok=True)
+os.environ["HOME"] = str(home)
+install.platform.system = lambda: "Darwin"
+
+ff = home / "Library" / "Application Support" / "Firefox"
+old = ff / "Profiles" / "old.default"
+real = ff / "Profiles" / "real.default-release"
+old.mkdir(parents=True, exist_ok=True)
+real.mkdir(parents=True, exist_ok=True)
+(ff / "profiles.ini").write_text(
+    "[General]\nStartWithLastProfile=1\nVersion=2\n\n"
+    "[Profile0]\nName=old\nIsRelative=1\nPath=Profiles/old.default\nDefault=1\n\n"
+    "[Profile1]\nName=default-release\nIsRelative=1\nPath=Profiles/real.default-release\n\n"
+    "[Install4F96D1932A9F858E]\nDefault=Profiles/old.default\nLocked=1\n",
+    encoding="utf-8",
+)
+(ff / "installs.ini").write_text(
+    "[4F96D1932A9F858E]\nDefault=Profiles/old.default\nLocked=1\n",
+    encoding="utf-8",
+)
+chosen = install.choose_profile(None, boot=real)
+assert chosen.resolve() == real.resolve(), chosen
+PY
+  pass "Python installer prefers the profile Firefox actually opens"
 fi
 
 # Linux: Firefox open, lock file present, --force closes it cleanly.
