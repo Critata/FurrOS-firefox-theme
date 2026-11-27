@@ -22,6 +22,7 @@ FORCE=0
 UNINSTALL=0
 SKIP_FIREFOX_INSTALL=0
 ALL_PROFILES=0
+SINGLE_PROFILE=0
 REPORT="$HOME/FurrOS-install-report.txt"
 REQUIRED_PREF='user_pref("toolkit.legacyUserProfileCustomizations.stylesheets", true);'
 MANAGED_MARKER='.furros-profile'
@@ -92,6 +93,7 @@ while [[ $# -gt 0 ]]; do
       shift
       ;;
     --single-profile)
+      SINGLE_PROFILE=1
       ALL_PROFILES=0
       shift
       ;;
@@ -122,7 +124,8 @@ done
 # On macOS a single wrong profile means the browser shows no change at all.
 # Theme every local Firefox profile by default so whichever one Firefox opens
 # is covered. An explicit --profile or --single-profile keeps the old behavior.
-if [[ "$(uname -s)" == "Darwin" && "$MANUAL_PROFILE" -eq 0 && "$ALL_PROFILES" -eq 0 ]]; then
+if [[ "$(uname -s)" == "Darwin" && "$MANUAL_PROFILE" -eq 0 \
+  && "$ALL_PROFILES" -eq 0 && "$SINGLE_PROFILE" -eq 0 ]]; then
   ALL_PROFILES=1
 fi
 

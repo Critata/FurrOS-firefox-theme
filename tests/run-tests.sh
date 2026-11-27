@@ -664,6 +664,34 @@ fi
 [[ -f "$MAC_TIE_UNLISTED/chrome/userChrome.css" ]] || fail "macOS missed an unregistered native profile"
 pass "macOS tie-break is automatic and themes all native profiles"
 
+# --single-profile must opt out of macOS multi-profile installation.
+MAC_SINGLE_HOME="$TMP/macsingle"
+MAC_SINGLE_FF="$MAC_SINGLE_HOME/Library/Application Support/Firefox"
+MAC_SINGLE_MAIN="$MAC_SINGLE_FF/Profiles/aaaa.default-release"
+MAC_SINGLE_OTHER="$MAC_SINGLE_FF/Profiles/zzzz.other"
+mkdir -p "$MAC_SINGLE_MAIN" "$MAC_SINGLE_OTHER"
+cat > "$MAC_SINGLE_FF/profiles.ini" <<'EOF'
+[General]
+StartWithLastProfile=1
+Version=2
+
+[Profile0]
+Name=default-release
+IsRelative=1
+Path=Profiles/aaaa.default-release
+
+[Profile1]
+Name=other
+IsRelative=1
+Path=Profiles/zzzz.other
+EOF
+HOME="$MAC_SINGLE_HOME" PATH="$MAC_BIN:$PATH" FURR_FIREFOX_BIN="$MAC_BIN/fake-firefox" \
+  "$ROOT/install.sh" --single-profile </dev/null > "$TMP/mac-single.out" 2>&1 \
+  || { cat "$TMP/mac-single.out" >&2; fail "macOS --single-profile install failed"; }
+[[ -f "$MAC_SINGLE_MAIN/chrome/userChrome.css" ]] || fail "--single-profile missed the selected profile"
+[[ ! -e "$MAC_SINGLE_OTHER/chrome" ]] || fail "--single-profile still themed another profile"
+pass "macOS --single-profile limits the theme to one profile"
+
 if command -v python3 >/dev/null 2>&1; then
   MAC_PY_ROOT="$TMP/macpython" PYTHONPATH="$ROOT" python3 -B - <<'PY' || fail "Python macOS profile detection failed"
 import builtins
